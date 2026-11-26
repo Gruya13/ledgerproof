@@ -62,8 +62,9 @@ npm run typecheck                           # TypeScript check for both backend 
 
 ### Continuous Chaos Stream Mode (Web UI & CLI)
 
-In the Web UI (`npm run ui`) or CLI (`--stream`), **ContinuousStreamGenerator** emits synthetic Black Friday invoices, payments, and SEPA requests (`INV-2001+`, `TX-5001+`, `REQ-6001+`) continuously while periodically (or on-demand via **Inject Trap Now**) injecting 6 intentional anomalies:
-- `split_typo`, `partial_late_stale`, `duplicate_invoice`, `orphan_wire`, `bec_iban_change` (non-blocking HITL pause), and `write_skew_race` (L1 + L2 CAS interlock).
+In the Web UI (`npm run ui`) or CLI (`--stream`), **ContinuousStreamGenerator** emits synthetic Black Friday invoices, payments, and SEPA requests (`INV-2001+`, `TX-5001+`, `REQ-6001+`) continuously with varied dynamic dollar amounts while periodically (or on-demand via **Inject Trap Now**) injecting 11 scenarios — both real traps and benign false-positive tests:
+- **Real Traps:** `split_typo`, `partial_late_stale`, `duplicate_invoice`, `orphan_wire`, `bec_iban_change` (non-blocking HITL pause), `write_skew_race` (L1 + L2 CAS interlock), `currency_mismatch`, and `overpayment_anomaly`.
+- **Benign / False-Positive Tests:** `legit_high_value_sepa` (including spaced IBAN normalization), `legit_high_value_refund` (`0` risk flags — safe to approve), and `false_positive_near_duplicate` (same vendor & amount, different PO).
 - In **Live LLM Mode**, a built-in `maxLlmCalls` budget guard (`default: 40`) auto-pauses the stream before runaway API usage while deterministic `StrictMatcher` ticks still cost `0` LLM calls.
 
 ---

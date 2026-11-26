@@ -38,7 +38,7 @@ describe("Continuous Chaos Stream & Trap Injection", () => {
 		})
 	})
 
-	it("runs continuous stream ticks while injecting all 6 traps and keeping HITL non-blocking", async () => {
+	it("runs continuous stream ticks while injecting all 11 scenarios (real traps + benign false-positives) and keeping HITL non-blocking", async () => {
 		const startRes = await fetch(`${baseUrl}/api/stream/start`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -52,53 +52,81 @@ describe("Continuous Chaos Stream & Trap Injection", () => {
 		})
 		expect(startRes.status).toBe(200)
 
-		for (const kind of ALL_TRAP_KINDS) {
+		// Inject every real trap + benign scenario, plus a second BEC IBAN change to verify varied dynamic amounts
+		for (const kind of [...ALL_TRAP_KINDS, "bec_iban_change" as const]) {
 			const trapRes = await fetch(`${baseUrl}/api/stream/inject-trap`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({ kind }),
 			})
 			expect(trapRes.status).toBe(200)
-			await sleep(60)
+			await sleep(55)
 		}
 
-		// Wait until BEC HITL appears while ticks continue advancing
+		// Wait until multiple HITLs appear (both benign 0-flag and BEC IBAN flagged) while ticks keep advancing
 		const pausedSnap = await pollUntil(
 			async () => (await (await fetch(`${baseUrl}/api/state`)).json()) as any,
-			(s) => s.pendingApprovals.length >= 1 && s.stream.tickCount >= 8,
+			(s) =>
+				s.pendingApprovals.some((a: any) => a.riskFlags.length === 0) &&
+				s.pendingApprovals.some((a: any) => a.riskFlags.includes("BEC_IBAN_CHANGE")) &&
+				s.stream.tickCount >= 12,
 		)
 		const ticksAtPause = pausedSnap.stream.tickCount
 		await sleep(260)
 		const laterSnap = (await (await fetch(`${baseUrl}/api/state`)).json()) as any
 		expect(laterSnap.stream.tickCount).toBeGreaterThan(ticksAtPause)
 
-		// Resolve all pending HITL approvals safely
-		for (const approval of laterSnap.pendingApprovals) {
-			const rejRes = await fetch(`${baseUrl}/api/approvals/${encodeURIComponent(approval.approvalId)}`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ approved: false, reason: "Rejected BEC IBAN in stream test" }),
-			})
-			expect(rejRes.status).toBe(200)
+		// Verify varied amounts across the two BEC IBAN traps
+		const becApprovals = laterSnap.pendingApprovals.filter((a: any) => a.riskFlags.includes("BEC_IBAN_CHANGE"))
+		if (becApprovals.length >= 2) {
+			expect(becApprovals[0].amountCents).not.toBe(becApprovals[1].amountCents)
 		}
 
-		// Wait for delayed late settlement + traps to converge
+		// Approve benign 0-risk-flag requests, reject BEC IBAN traps!
+		for (const approval of laterSnap.pendingApprovals) {
+			const shouldApprove = approval.riskFlags.length === 0
+			const actRes = await fetch(`${baseUrl}/api/approvals/${encodeURIComponent(approval.approvalId)}`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					approved: shouldApprove,
+					reason: shouldApprove ? "Approved benign policy threshold check" : "Rejected BEC IBAN trap",
+				}),
+			})
+			expect(actRes.status).toBe(200)
+		}
+
+		// Wait for all traps & approved benign actions + delayed late settlement to converge
 		const converged = await pollUntil(
 			async () => (await (await fetch(`${baseUrl}/api/state`)).json()) as any,
 			(s) =>
 				s.metrics.staleInvalidations >= 1 &&
 				s.metrics.casConflictsPrevented >= 1 &&
 				s.metrics.uncitedNumbersBlocked >= 1 &&
-				s.unmatchedTxIds.length >= 1,
+				s.unmatchedTxIds.length >= 1 &&
+				s.cells.some((c: any) => c.record.status === "REFUNDED") &&
+				s.cells.some((c: any) => c.record.status === "SEPA_DRAFT_READY") &&
+				s.cells.some((c: any) => c.record.riskFlags.includes("CURRENCY_MISMATCH")) &&
+				s.cells.some((c: any) => c.record.riskFlags.includes("OVERPAYMENT_ANOMALY")),
 		)
 
 		const stopRes = await fetch(`${baseUrl}/api/stream/stop`, { method: "POST" })
 		expect(stopRes.status).toBe(200)
 
+		// Verify false-positive near-duplicate (same vendor + same amount, different PO) closed cleanly as MATCHED with 0 risk flags
+		const nearDupCells = converged.cells.filter(
+			(c: any) =>
+				c.record.status === "MATCHED" &&
+				c.record.riskFlags.length === 0 &&
+				c.record.matchedTxIds.length === 1 &&
+				c.record.expectedAmountCents >= 31000,
+		)
+		expect(nearDupCells.length).toBeGreaterThanOrEqual(2)
+
 		expect(converged.metrics.peakConcurrentLoops).toBeGreaterThanOrEqual(3)
 		expect(converged.metrics.deterministicMatches).toBeGreaterThanOrEqual(1)
 		expect(converged.metrics.inventedNumbersLeaked).toBe(0)
-		expect(converged.metrics.humanApprovalsRouted).toBeGreaterThanOrEqual(1)
+		expect(converged.metrics.humanApprovalsRouted).toBeGreaterThanOrEqual(3)
 	})
 
 	it("auto-pauses continuous stream when maxLlmCalls budget cap is reached", async () => {

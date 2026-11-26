@@ -13,6 +13,8 @@ function statusBadgeClass(status: string): string {
 			return "badge badge-matched"
 		case "SEPA_DRAFT_READY":
 			return "badge badge-sepa"
+		case "REFUNDED":
+			return "badge badge-stale"
 		case "PARTIAL":
 			return "badge badge-partial"
 		case "DUPLICATE":
@@ -272,15 +274,24 @@ export function App() {
 						className="select-input"
 						value={trapKind}
 						onChange={(e) => setTrapKind(e.target.value)}
-						aria-label="Select trap kind"
+						aria-label="Select trap or scenario kind"
 					>
-						<option value="">Next Scheduled Trap (Cycle)</option>
-						<option value="split_typo">Split Payment + Memo Typo</option>
-						<option value="partial_late_stale">Partial -&gt; Late Settlement (STALE)</option>
-						<option value="duplicate_invoice">Duplicate Invoice</option>
-						<option value="orphan_wire">Orphan Bank Wire</option>
-						<option value="bec_iban_change">BEC IBAN Change (HITL)</option>
-						<option value="write_skew_race">Write-Skew Race + L1 Trap</option>
+						<option value="">Next Scheduled Scenario (Mixed Cycle)</option>
+						<optgroup label="Real Financial Traps">
+							<option value="split_typo">Split Payment + Memo Typo</option>
+							<option value="partial_late_stale">Partial -&gt; Late Settlement (STALE)</option>
+							<option value="duplicate_invoice">Duplicate Invoice</option>
+							<option value="orphan_wire">Orphan Bank Wire</option>
+							<option value="bec_iban_change">BEC IBAN Change (HITL - Reject)</option>
+							<option value="write_skew_race">Write-Skew Race + L1 Trap</option>
+							<option value="currency_mismatch">Currency Mismatch (USD vs EUR)</option>
+							<option value="overpayment_anomaly">Overpayment Anomaly</option>
+						</optgroup>
+						<optgroup label="False-Positive &amp; Benign Tests">
+							<option value="legit_high_value_sepa">Legit High-Value SEPA (HITL - Approve)</option>
+							<option value="legit_high_value_refund">Legit High-Value Refund (HITL - Approve)</option>
+							<option value="false_positive_near_duplicate">Near-Duplicate Different PO (Benign)</option>
+						</optgroup>
 					</select>
 					<button
 						type="button"
@@ -355,47 +366,61 @@ export function App() {
 				</div>
 			</section>
 
-			{(snapshot?.pendingApprovals ?? []).map((approval) => (
-				<section key={approval.approvalId} className="hitl-card">
-					<div className="hitl-meta">
-						<h3>
-							ProofGate L3 Human Approval Required — {approval.requestId} ({formatUsd(approval.amountCents)})
-						</h3>
-						<p>{approval.reason}</p>
-						<div>
-							<span className="badge badge-risk" style={{ marginRight: 6 }}>
-								Only this loop is paused — peer Mozaik agents continue running
-							</span>
-							{approval.citations.map((c, idx) => (
-								<button
-									key={idx}
-									type="button"
-									className="src-pill mono"
-									onClick={() => void inspectSource(c.sourceId)}
+			{(snapshot?.pendingApprovals ?? []).map((approval) => {
+				const isBenignPolicyCheck = approval.riskFlags.length === 0
+				return (
+					<section
+						key={approval.approvalId}
+						className={`hitl-card ${isBenignPolicyCheck ? "benign" : ""}`}
+					>
+						<div className="hitl-meta">
+							<h3>
+								ProofGate L3 Human Approval Required — {approval.requestId} ({formatUsd(approval.amountCents)})
+							</h3>
+							<p>{approval.reason}</p>
+							<div>
+								<span
+									className={`badge ${isBenignPolicyCheck ? "badge-matched" : "badge-risk"}`}
+									style={{ marginRight: 6 }}
 								>
-									src:{c.sourceId}.{c.field}
-								</button>
-							))}
+									{isBenignPolicyCheck
+										? "0 Risk Flags — Policy Limit Check Only"
+										: `RISK FLAGS: ${approval.riskFlags.join(", ")}`}
+								</span>
+								<span className="badge badge-sepa" style={{ marginRight: 6 }}>
+									Only this loop is paused — peer agents keep running
+								</span>
+								{approval.citations.map((c, idx) => (
+									<button
+										key={idx}
+										type="button"
+										className="src-pill mono"
+										onClick={() => void inspectSource(c.sourceId)}
+									>
+										src:{c.sourceId}.{c.field}
+									</button>
+								))}
+							</div>
 						</div>
-					</div>
-					<div className="hitl-actions">
-						<button
-							type="button"
-							className="btn btn-danger"
-							onClick={() => void handleApproval(approval.approvalId, false)}
-						>
-							Reject Payout (Lock HOLD_RISK)
-						</button>
-						<button
-							type="button"
-							className="btn btn-success"
-							onClick={() => void handleApproval(approval.approvalId, true)}
-						>
-							Approve Payout
-						</button>
-					</div>
-				</section>
-			))}
+						<div className="hitl-actions">
+							<button
+								type="button"
+								className="btn btn-danger"
+								onClick={() => void handleApproval(approval.approvalId, false)}
+							>
+								Reject (Lock HOLD_RISK)
+							</button>
+							<button
+								type="button"
+								className="btn btn-success"
+								onClick={() => void handleApproval(approval.approvalId, true)}
+							>
+								Approve Execution
+							</button>
+						</div>
+					</section>
+				)
+			})}
 
 			<SwimlaneChart
 				spans={m?.spans ?? []}

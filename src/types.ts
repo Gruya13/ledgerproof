@@ -89,6 +89,8 @@ export type RiskFlag =
 	| "BEC_IBAN_CHANGE"
 	| "FRAUD_VELOCITY"
 	| "WRITE_SKEW_COLLISION"
+	| "CURRENCY_MISMATCH"
+	| "OVERPAYMENT_ANOMALY"
 
 export interface PendingDraft {
 	draftId: string

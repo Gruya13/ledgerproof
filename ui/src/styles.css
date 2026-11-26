@@ -260,6 +260,11 @@ body {
   gap: 14px;
 }
 
+.hitl-card.benign {
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.12), rgba(16, 185, 129, 0.08));
+  border-color: rgba(56, 189, 248, 0.55);
+}
+
 .hitl-meta h3 {
   margin: 0 0 4px;
   font-size: 15px;

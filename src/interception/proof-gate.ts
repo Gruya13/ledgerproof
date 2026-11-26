@@ -19,6 +19,10 @@ function parseArgs(raw: string): unknown {
 	}
 }
 
+export function normalizeIban(iban: string): string {
+	return iban.replace(/\s+/g, "").toUpperCase()
+}
+
 export class ProofGateInterceptionHandler implements InterceptionHandler {
 	private proseRetried = false
 	private toolRejections = 0
@@ -127,7 +131,9 @@ export class ProofGateInterceptionHandler implements InterceptionHandler {
 			const req = args.requestId ? state.sourceStore.getRequest(args.requestId) : undefined
 			const vendor = req ? state.sourceStore.getVendor(req.vendorId) : undefined
 			const ibanMismatch =
-				Boolean(req?.targetIban) && Boolean(vendor?.masterIban) && req?.targetIban !== vendor?.masterIban
+				Boolean(req?.targetIban) &&
+				Boolean(vendor?.masterIban) &&
+				normalizeIban(req!.targetIban!) !== normalizeIban(vendor!.masterIban)
 			const overLimit = (args.amountCents ?? 0) > state.spendingLimitCents
 			const hasHardRiskBlock =
 				snap.value.riskFlags.includes("FRAUD_VELOCITY") ||
@@ -195,15 +201,21 @@ export class ProofGateInterceptionHandler implements InterceptionHandler {
 				}
 
 				const reasons: string[] = []
-				if (overLimit) {
+				if (overLimit && !ibanMismatch && flags.length === 0) {
 					reasons.push(
-						`Amount $${((args.amountCents ?? 0) / 100).toFixed(2)} exceeds auto-approve limit $${(state.spendingLimitCents / 100).toFixed(2)}`,
+						`Amount $${((args.amountCents ?? 0) / 100).toFixed(2)} exceeds auto-approve limit $${(state.spendingLimitCents / 100).toFixed(2)} (IBAN verified / no fraud flags — safe to approve if authorized)`,
 					)
-				}
-				if (ibanMismatch) {
-					reasons.push(
-						`Target IBAN ${req?.targetIban} does not match vendor master IBAN ${vendor?.masterIban} (${vendor?.sourceId})`,
-					)
+				} else {
+					if (overLimit) {
+						reasons.push(
+							`Amount $${((args.amountCents ?? 0) / 100).toFixed(2)} exceeds auto-approve limit $${(state.spendingLimitCents / 100).toFixed(2)}`,
+						)
+					}
+					if (ibanMismatch) {
+						reasons.push(
+							`Target IBAN ${req?.targetIban} does not match vendor master IBAN ${vendor?.masterIban} (${vendor?.sourceId})`,
+						)
+					}
 				}
 
 				const approval: PendingApproval = {

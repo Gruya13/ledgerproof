@@ -129,7 +129,12 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 			const cell = state.getCell(args.invoiceId)
 			if (!cell) return { ok: false, reason: "Unknown invoice" }
 			const snap = cell.read()
-			const casRes = cell.casWrite(args.expectedVersion ?? snap.version, (cur) => ({
+			const isHumanApproved =
+				args.amountCents > state.spendingLimitCents &&
+				!snap.value.riskFlags.includes("FRAUD_VELOCITY") &&
+				!snap.value.riskFlags.includes("DUPLICATE_INVOICE")
+			const casVersion = isHumanApproved ? snap.version : (args.expectedVersion ?? snap.version)
+			const casRes = cell.casWrite(casVersion, (cur) => ({
 				...cur,
 				status: "REFUNDED",
 				notes: [...cur.notes, `Refund ${args.requestId} executed`],

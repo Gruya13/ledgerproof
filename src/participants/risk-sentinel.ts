@@ -12,7 +12,7 @@ import {
 	type Tool,
 } from "@mozaik-ai/core"
 import type { LedgerRuntimeApi } from "../runtime"
-import { ProofGateInterceptionHandler } from "../interception/proof-gate"
+import { normalizeIban, ProofGateInterceptionHandler } from "../interception/proof-gate"
 import { CITATION_ARRAY_SCHEMA } from "./schemas"
 import type { BankTransaction, Citation, ClaimRecord, Invoice, PaymentRequest, RiskFlag } from "../types"
 
@@ -37,7 +37,13 @@ export function createRiskSentinelAgent(rt: LedgerRuntimeApi, modelName: string)
 				invoiceId: { type: "string" },
 				riskFlag: {
 					type: "string",
-					enum: ["DUPLICATE_INVOICE", "BEC_IBAN_CHANGE", "FRAUD_VELOCITY"],
+					enum: [
+						"DUPLICATE_INVOICE",
+						"BEC_IBAN_CHANGE",
+						"FRAUD_VELOCITY",
+						"CURRENCY_MISMATCH",
+						"OVERPAYMENT_ANOMALY",
+					],
 				},
 				severity: { type: "string", enum: ["HIGH", "CRITICAL"] },
 				reason: { type: "string" },
@@ -134,11 +140,38 @@ export function createRiskSentinelAgent(rt: LedgerRuntimeApi, modelName: string)
 						transaction,
 						invoice: state.sourceStore.getInvoice(transaction.reference),
 					}
+				} else if (transaction.kind === "bank_transfer" || transaction.kind === "card_capture") {
+					const inv = state.sourceStore.getInvoice(transaction.reference.trim().toUpperCase())
+					if (inv) {
+						if (transaction.currency !== inv.currency) {
+							shouldInvokeLlm = true
+							targetId = transaction.sourceId
+							eventLabel = `transaction.currency_mismatch:${transaction.sourceId}`
+							payloadForPrompt = {
+								currencyMismatch: { invoice: inv, transaction },
+							}
+						} else if (transaction.amountCents > inv.amountCents) {
+							shouldInvokeLlm = true
+							targetId = transaction.sourceId
+							eventLabel = `transaction.overpayment:${transaction.sourceId}`
+							payloadForPrompt = {
+								overpayment: {
+									invoice: inv,
+									transaction,
+									excessCents: transaction.amountCents - inv.amountCents,
+								},
+							}
+						}
+					}
 				}
 			} else if (context.event.type === "request.arrived") {
 				const { request } = context.event.payload as { request: PaymentRequest }
 				const vendor = state.sourceStore.getVendor(request.vendorId)
-				if (request.targetIban && vendor && request.targetIban !== vendor.masterIban) {
+				if (
+					request.targetIban &&
+					vendor &&
+					normalizeIban(request.targetIban) !== normalizeIban(vendor.masterIban)
+				) {
 					shouldInvokeLlm = true
 					targetId = request.sourceId
 					eventLabel = `request.arrived:${request.sourceId}`
@@ -197,9 +230,11 @@ export function createRiskSentinelAgent(rt: LedgerRuntimeApi, modelName: string)
 			"You are RiskSentinel, a concurrent financial risk agent.",
 			"Rules:",
 			"1. Duplicate invoice (same vendor, PO, amountCents): call flag_risk with riskFlag='DUPLICATE_INVOICE', severity='HIGH', citing poNumber and amountCents on both invoices.",
-			"2. BEC IBAN mismatch (request.targetIban != vendor.masterIban): call flag_risk with riskFlag='BEC_IBAN_CHANGE', severity='CRITICAL', citing request.targetIban and vendor.masterIban.",
+			"2. BEC IBAN mismatch (normalized request.targetIban != normalized vendor.masterIban): call flag_risk with riskFlag='BEC_IBAN_CHANGE', severity='CRITICAL', citing request.targetIban and vendor.masterIban.",
 			"3. Fraud alert transaction (kind='fraud_alert'): call flag_risk with riskFlag='FRAUD_VELOCITY', severity='CRITICAL', citing transaction.amountCents and invoice.amountCents.",
-			"4. In your final text reply, include [src:ID] tags for every invoice/transaction/request/vendor and dollar amount mentioned.",
+			"4. Currency mismatch (payload.currencyMismatch): call flag_risk with riskFlag='CURRENCY_MISMATCH', severity='HIGH', citing invoice.currency, transaction.currency, and invoice.amountCents.",
+			"5. Overpayment anomaly (payload.overpayment): call flag_risk with riskFlag='OVERPAYMENT_ANOMALY', severity='HIGH', citing invoice.amountCents and transaction.amountCents.",
+			"6. In your final text reply, include [src:ID] tags for every invoice/transaction/request/vendor and dollar amount mentioned.",
 		].join("\n"),
 		tools: [flagRiskTool],
 		handlers: [handler],

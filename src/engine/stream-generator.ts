@@ -7,6 +7,11 @@ export type TrapKind =
 	| "orphan_wire"
 	| "bec_iban_change"
 	| "write_skew_race"
+	| "currency_mismatch"
+	| "overpayment_anomaly"
+	| "legit_high_value_sepa"
+	| "legit_high_value_refund"
+	| "false_positive_near_duplicate"
 
 export const ALL_TRAP_KINDS: TrapKind[] = [
 	"split_typo",
@@ -15,6 +20,26 @@ export const ALL_TRAP_KINDS: TrapKind[] = [
 	"orphan_wire",
 	"bec_iban_change",
 	"write_skew_race",
+	"currency_mismatch",
+	"overpayment_anomaly",
+	"legit_high_value_sepa",
+	"legit_high_value_refund",
+	"false_positive_near_duplicate",
+]
+
+// Interleaved mix of real traps and benign/false-positive stress tests
+const ROTATION_ORDER: TrapKind[] = [
+	"split_typo",
+	"legit_high_value_sepa",
+	"bec_iban_change",
+	"partial_late_stale",
+	"false_positive_near_duplicate",
+	"currency_mismatch",
+	"write_skew_race",
+	"legit_high_value_refund",
+	"overpayment_anomaly",
+	"duplicate_invoice",
+	"orphan_wire",
 ]
 
 export interface StreamTickBatch {
@@ -28,9 +53,14 @@ export interface StreamTickBatch {
 	concurrentFraudAlerts: BankTransaction[]
 }
 
+function formatSpacedIban(iban: string): string {
+	return iban.replace(/(.{4})/g, "$1 ").trim()
+}
+
 /**
  * Generates realistic continuous Black Friday financial traffic (invoices, payments, SEPA drafts)
- * starting at INV-2001 / TX-5001 / REQ-6001, periodically injecting one of 6 intentional traps.
+ * starting at INV-2001 / TX-5001 / REQ-6001, with varied dynamic amounts and a mix of
+ * real financial traps + benign false-positive edge cases.
  */
 export class ContinuousStreamGenerator {
 	private invSeq = 2000
@@ -39,6 +69,7 @@ export class ContinuousStreamGenerator {
 	private poSeq = 8000
 	private tickSeq = 0
 	private trapCursor = 0
+	private scenarioSeq = 0
 
 	constructor(private readonly vendors: Vendor[]) {}
 
@@ -59,14 +90,28 @@ export class ContinuousStreamGenerator {
 	}
 
 	private pickVendor(offset = 0): Vendor {
-		return this.vendors[(this.tickSeq + offset) % this.vendors.length]
+		return this.vendors[(this.tickSeq + this.scenarioSeq + offset) % this.vendors.length]
+	}
+
+	/**
+	 * Deterministic varied amount generator so consecutive traps/HITLs never reuse identical dollar figures.
+	 */
+	private variedCents(minDollars: number, maxDollars: number, includeCents = true): number {
+		this.scenarioSeq += 1
+		const span = Math.max(10, maxDollars - minDollars)
+		// Golden-ratio stepping ensures non-repeating spread across the range
+		const frac = ((this.scenarioSeq * 0.61803398875) % 1)
+		const wholeDollars = minDollars + Math.floor(frac * span)
+		const centsPart = includeCents ? [0, 25, 40, 50, 75, 80, 90][this.scenarioSeq % 7] : 0
+		return wholeDollars * 100 + centsPart
 	}
 
 	nextTick(opts: { forceTrap?: TrapKind; trapCadence?: number } = {}): StreamTickBatch {
 		this.tickSeq += 1
 		const cadence = Math.max(2, opts.trapCadence ?? 3)
 		const trapKind =
-			opts.forceTrap ?? (this.tickSeq % cadence === 0 ? ALL_TRAP_KINDS[this.trapCursor++ % ALL_TRAP_KINDS.length] : null)
+			opts.forceTrap ??
+			(this.tickSeq % cadence === 0 ? ROTATION_ORDER[this.trapCursor++ % ROTATION_ORDER.length] : null)
 
 		if (!trapKind) {
 			return this.buildCleanTick()
@@ -85,6 +130,16 @@ export class ContinuousStreamGenerator {
 				return this.buildBecIbanChangeTrap()
 			case "write_skew_race":
 				return this.buildWriteSkewRaceTrap()
+			case "currency_mismatch":
+				return this.buildCurrencyMismatchTrap()
+			case "overpayment_anomaly":
+				return this.buildOverpaymentAnomalyTrap()
+			case "legit_high_value_sepa":
+				return this.buildLegitHighValueSepa()
+			case "legit_high_value_refund":
+				return this.buildLegitHighValueRefund()
+			case "false_positive_near_duplicate":
+				return this.buildFalsePositiveNearDuplicate()
 		}
 	}
 
@@ -92,7 +147,7 @@ export class ContinuousStreamGenerator {
 		const vendor = this.pickVendor()
 		const invId = this.nextInvId()
 		const txId = this.nextTxId()
-		const amountCents = 8500 + ((this.tickSeq * 1350) % 14000) // stays <= $250 for clean auto SEPA checks
+		const amountCents = this.variedCents(65, 240)
 		const inv: Invoice = {
 			sourceId: invId,
 			vendorId: vendor.sourceId,
@@ -101,7 +156,7 @@ export class ContinuousStreamGenerator {
 			currency: "USD",
 			issuedAt: "2026-11-26",
 			dueDate: "2026-12-05",
-			description: `Stream Black Friday batch item #${this.tickSeq}`,
+			description: `Stream Black Friday order batch #${this.tickSeq}`,
 		}
 		const tx: BankTransaction = {
 			sourceId: txId,
@@ -115,7 +170,6 @@ export class ContinuousStreamGenerator {
 			late: false,
 		}
 
-		// Every 4th clean tick also creates a routine <= $250 SEPA draft to prove controlled auto-approval
 		const requests: PaymentRequest[] = []
 		if (this.tickSeq % 4 === 1) {
 			requests.push({
@@ -127,7 +181,7 @@ export class ContinuousStreamGenerator {
 				currency: "USD",
 				targetIban: vendor.masterIban,
 				requestedBy: "ap-automation",
-				reason: "Routine Black Friday vendor payout within limit",
+				reason: "Routine Black Friday vendor payout within $250 limit",
 				concurrentWithAlert: false,
 			})
 		}
@@ -147,9 +201,9 @@ export class ContinuousStreamGenerator {
 	private buildSplitTypoTrap(): StreamTickBatch {
 		const vendor = this.pickVendor(1)
 		const invId = this.nextInvId()
-		const part1 = 42000
-		const part2 = 28000
-		const total = part1 + part2
+		const total = this.variedCents(540, 1680)
+		const part1 = Math.round((total * (55 + (this.scenarioSeq % 15))) / 100 / 100) * 100
+		const part2 = total - part1
 		const typoRef = invId.replace(/0/, "O")
 
 		const inv: Invoice = {
@@ -201,9 +255,9 @@ export class ContinuousStreamGenerator {
 		const vendor = this.pickVendor(2)
 		const invId = this.nextInvId()
 		const invNum = invId.split("-")[1]
-		const paidNow = 35000
-		const lateAmount = 25000
-		const total = paidNow + lateAmount
+		const total = this.variedCents(480, 1250)
+		const paidNow = Math.round((total * 0.6) / 100) * 100
+		const lateAmount = total - paidNow
 
 		const inv: Invoice = {
 			sourceId: invId,
@@ -253,7 +307,7 @@ export class ContinuousStreamGenerator {
 	private buildDuplicateInvoiceTrap(): StreamTickBatch {
 		const vendor = this.pickVendor(3)
 		const po = this.nextPo()
-		const amountCents = 49000
+		const amountCents = this.variedCents(290, 920)
 		const invOrig: Invoice = {
 			sourceId: this.nextInvId(),
 			vendorId: vendor.sourceId,
@@ -289,7 +343,7 @@ export class ContinuousStreamGenerator {
 		return {
 			tickNumber: this.tickSeq,
 			trapKind: "duplicate_invoice",
-			label: `TRAP [Duplicate Invoice]: ${invDup.sourceId} duplicates ${invOrig.sourceId} (${po})`,
+			label: `TRAP [Duplicate Invoice]: ${invDup.sourceId} duplicates ${invOrig.sourceId} ($${(amountCents / 100).toFixed(2)}, ${po})`,
 			invoices: [invOrig, invDup],
 			transactions: [txOrig],
 			delayedTransactions: [],
@@ -299,7 +353,7 @@ export class ContinuousStreamGenerator {
 	}
 
 	private buildOrphanWireTrap(): StreamTickBatch {
-		const amountCents = 17425 + ((this.tickSeq * 500) % 9000)
+		const amountCents = this.variedCents(112, 648)
 		const txOrphan: BankTransaction = {
 			sourceId: this.nextTxId(),
 			kind: "wire",
@@ -329,8 +383,9 @@ export class ContinuousStreamGenerator {
 		const invId = this.nextInvId()
 		const txId = this.nextTxId()
 		const reqId = this.nextReqId()
-		const amountCents = 58000
-		const spoofedIban = `${vendor.country}9900008877665544`
+		const amountCents = this.variedCents(315, 1490)
+		const spoofSuffix = String(100000 + ((this.scenarioSeq * 7919) % 899999))
+		const spoofedIban = `${vendor.country}99000099${spoofSuffix}`
 
 		const inv: Invoice = {
 			sourceId: invId,
@@ -361,7 +416,7 @@ export class ContinuousStreamGenerator {
 			amountCents,
 			currency: "USD",
 			targetIban: spoofedIban,
-			requestedBy: "spoofed-vendor-mail@example.invalid",
+			requestedBy: `billing-override-${this.scenarioSeq}@vendor-update.invalid`,
 			reason: "Urgent Black Friday bank account override",
 			concurrentWithAlert: false,
 		}
@@ -384,7 +439,7 @@ export class ContinuousStreamGenerator {
 		const txCaptureId = this.nextTxId()
 		const reqId = this.nextReqId()
 		const alertTxId = this.nextTxId()
-		const amountCents = 34000
+		const amountCents = this.variedCents(275, 780)
 
 		const inv: Invoice = {
 			sourceId: invId,
@@ -434,12 +489,267 @@ export class ContinuousStreamGenerator {
 		return {
 			tickNumber: this.tickSeq,
 			trapKind: "write_skew_race",
-			label: `TRAP [CAS Write-Skew + L1]: ${reqId} vs ${alertTxId} on ${invId}`,
+			label: `TRAP [CAS Write-Skew + L1]: ${reqId} vs ${alertTxId} on ${invId} ($${(amountCents / 100).toFixed(2)})`,
 			invoices: [inv],
 			transactions: [txCapture],
 			delayedTransactions: [],
 			requests: [reqRefund],
 			concurrentFraudAlerts: [fraudAlert],
+		}
+	}
+
+	private buildCurrencyMismatchTrap(): StreamTickBatch {
+		const vendor = this.pickVendor(2)
+		const invId = this.nextInvId()
+		const txId = this.nextTxId()
+		const amountCents = this.variedCents(320, 890)
+
+		const inv: Invoice = {
+			sourceId: invId,
+			vendorId: vendor.sourceId,
+			poNumber: this.nextPo(),
+			amountCents,
+			currency: "USD",
+			issuedAt: "2026-11-26",
+			dueDate: "2026-12-03",
+			description: `Cross-border settlement (${invId})`,
+		}
+		const tx: BankTransaction = {
+			sourceId: txId,
+			kind: "bank_transfer",
+			reference: invId,
+			vendorId: vendor.sourceId,
+			amountCents,
+			currency: "EUR",
+			bookedAt: "2026-11-26",
+			memo: `Cross-currency transfer ${invId} in EUR instead of USD`,
+			late: false,
+		}
+
+		return {
+			tickNumber: this.tickSeq,
+			trapKind: "currency_mismatch",
+			label: `TRAP [Currency Mismatch]: ${invId} USD vs ${txId} EUR ($${(amountCents / 100).toFixed(2)})`,
+			invoices: [inv],
+			transactions: [tx],
+			delayedTransactions: [],
+			requests: [],
+			concurrentFraudAlerts: [],
+		}
+	}
+
+	private buildOverpaymentAnomalyTrap(): StreamTickBatch {
+		const vendor = this.pickVendor(1)
+		const invId = this.nextInvId()
+		const txId = this.nextTxId()
+		const invoiceCents = this.variedCents(260, 610)
+		const excessCents = this.variedCents(45, 140)
+		const paidCents = invoiceCents + excessCents
+
+		const inv: Invoice = {
+			sourceId: invId,
+			vendorId: vendor.sourceId,
+			poNumber: this.nextPo(),
+			amountCents: invoiceCents,
+			currency: "USD",
+			issuedAt: "2026-11-26",
+			dueDate: "2026-12-03",
+			description: `Equipment invoice (${invId})`,
+		}
+		const tx: BankTransaction = {
+			sourceId: txId,
+			kind: "bank_transfer",
+			reference: invId,
+			vendorId: vendor.sourceId,
+			amountCents: paidCents,
+			currency: "USD",
+			bookedAt: "2026-11-26",
+			memo: `Overpaid remittance for ${invId} (+$${(excessCents / 100).toFixed(2)} excess)`,
+			late: false,
+		}
+
+		return {
+			tickNumber: this.tickSeq,
+			trapKind: "overpayment_anomaly",
+			label: `TRAP [Overpayment]: ${txId} ($${(paidCents / 100).toFixed(2)}) > ${invId} ($${(invoiceCents / 100).toFixed(2)})`,
+			invoices: [inv],
+			transactions: [tx],
+			delayedTransactions: [],
+			requests: [],
+			concurrentFraudAlerts: [],
+		}
+	}
+
+	private buildLegitHighValueSepa(): StreamTickBatch {
+		const vendor = this.pickVendor(0)
+		const invId = this.nextInvId()
+		const txId = this.nextTxId()
+		const reqId = this.nextReqId()
+		const amountCents = this.variedCents(285, 1740)
+		// Format with spaces every other time to stress-test whitespace IBAN normalization
+		const targetIban = this.scenarioSeq % 2 === 0 ? formatSpacedIban(vendor.masterIban) : vendor.masterIban
+
+		const inv: Invoice = {
+			sourceId: invId,
+			vendorId: vendor.sourceId,
+			poNumber: this.nextPo(),
+			amountCents,
+			currency: "USD",
+			issuedAt: "2026-11-26",
+			dueDate: "2026-12-04",
+			description: `Authorized Black Friday capacity upgrade (${invId})`,
+		}
+		const tx: BankTransaction = {
+			sourceId: txId,
+			kind: "bank_transfer",
+			reference: invId,
+			vendorId: vendor.sourceId,
+			amountCents,
+			currency: "USD",
+			bookedAt: "2026-11-26",
+			memo: `Verified settlement ${invId} ${vendor.name}`,
+			late: false,
+		}
+		const req: PaymentRequest = {
+			sourceId: reqId,
+			kind: "sepa_payout",
+			invoiceId: invId,
+			vendorId: vendor.sourceId,
+			amountCents,
+			currency: "USD",
+			targetIban,
+			requestedBy: "cfo-approved@ledgerproof.internal",
+			reason: "Legitimate high-value SEPA payout (master IBAN verified, requires >$250 sign-off)",
+			concurrentWithAlert: false,
+		}
+
+		return {
+			tickNumber: this.tickSeq,
+			trapKind: "legit_high_value_sepa",
+			label: `BENIGN [Legit High-Value SEPA HITL]: ${reqId} on ${invId} ($${(amountCents / 100).toFixed(2)})`,
+			invoices: [inv],
+			transactions: [tx],
+			delayedTransactions: [],
+			requests: [req],
+			concurrentFraudAlerts: [],
+		}
+	}
+
+	private buildLegitHighValueRefund(): StreamTickBatch {
+		const vendor = this.pickVendor(3)
+		const invId = this.nextInvId()
+		const txId = this.nextTxId()
+		const reqId = this.nextReqId()
+		const amountCents = this.variedCents(270, 695)
+
+		const inv: Invoice = {
+			sourceId: invId,
+			vendorId: vendor.sourceId,
+			poNumber: this.nextPo(),
+			amountCents,
+			currency: "USD",
+			issuedAt: "2026-11-26",
+			dueDate: "2026-12-04",
+			description: `Black Friday enterprise bundle (${invId})`,
+		}
+		const tx: BankTransaction = {
+			sourceId: txId,
+			kind: "card_capture",
+			reference: invId,
+			vendorId: vendor.sourceId,
+			amountCents,
+			currency: "USD",
+			bookedAt: "2026-11-26",
+			memo: `Clean checkout capture ${invId}`,
+			late: false,
+		}
+		const req: PaymentRequest = {
+			sourceId: reqId,
+			kind: "refund",
+			invoiceId: invId,
+			vendorId: vendor.sourceId,
+			amountCents,
+			currency: "USD",
+			targetIban: null,
+			requestedBy: "support-rma-verified@ledgerproof.internal",
+			reason: "Verified RMA warehouse return (no fraud flags, requires >$250 sign-off)",
+			concurrentWithAlert: false,
+		}
+
+		return {
+			tickNumber: this.tickSeq,
+			trapKind: "legit_high_value_refund",
+			label: `BENIGN [Legit High-Value Refund HITL]: ${reqId} on ${invId} ($${(amountCents / 100).toFixed(2)})`,
+			invoices: [inv],
+			transactions: [tx],
+			delayedTransactions: [],
+			requests: [req],
+			concurrentFraudAlerts: [],
+		}
+	}
+
+	private buildFalsePositiveNearDuplicate(): StreamTickBatch {
+		const vendor = this.pickVendor(4)
+		const amountCents = this.variedCents(310, 740)
+		const invAId = this.nextInvId()
+		const invBId = this.nextInvId()
+		const txAId = this.nextTxId()
+		const txBId = this.nextTxId()
+		const poA = this.nextPo()
+		const poB = this.nextPo()
+
+		const invA: Invoice = {
+			sourceId: invAId,
+			vendorId: vendor.sourceId,
+			poNumber: poA,
+			amountCents,
+			currency: "USD",
+			issuedAt: "2026-11-26",
+			dueDate: "2026-12-04",
+			description: `Storefront A replenishment (${poA})`,
+		}
+		const invB: Invoice = {
+			sourceId: invBId,
+			vendorId: vendor.sourceId,
+			poNumber: poB,
+			amountCents,
+			currency: "USD",
+			issuedAt: "2026-11-26",
+			dueDate: "2026-12-04",
+			description: `Storefront B replenishment (${poB})`,
+		}
+		const txA: BankTransaction = {
+			sourceId: txAId,
+			kind: "bank_transfer",
+			reference: invAId,
+			vendorId: vendor.sourceId,
+			amountCents,
+			currency: "USD",
+			bookedAt: "2026-11-26",
+			memo: `Settlement ${invAId} ${poA}`,
+			late: false,
+		}
+		const txB: BankTransaction = {
+			sourceId: txBId,
+			kind: "bank_transfer",
+			reference: invBId,
+			vendorId: vendor.sourceId,
+			amountCents,
+			currency: "USD",
+			bookedAt: "2026-11-26",
+			memo: `Settlement ${invBId} ${poB}`,
+			late: false,
+		}
+
+		return {
+			tickNumber: this.tickSeq,
+			trapKind: "false_positive_near_duplicate",
+			label: `BENIGN [Near-Duplicate False-Positive Test]: ${invAId} (${poA}) & ${invBId} (${poB}) both $${(amountCents / 100).toFixed(2)}`,
+			invoices: [invA, invB],
+			transactions: [txA, txB],
+			delayedTransactions: [],
+			requests: [],
+			concurrentFraudAlerts: [],
 		}
 	}
 }

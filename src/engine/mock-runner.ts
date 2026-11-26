@@ -310,6 +310,19 @@ export class MockInferenceRunner implements InferenceRunner {
 			]
 		}
 
+		// Legitimate non-alert refund (routes to L3 HITL if > $250, becomes REFUNDED when approved)
+		if (req?.kind === "refund" && !req.concurrentWithAlert && previousCalls.length >= 1) {
+			const lastOut = previousOutputs[previousOutputs.length - 1]?.output ?? ""
+			const blocked = lastOut.includes('"ok":false')
+			return [
+				ModelMessageItem.rehydrate({
+					text: blocked
+						? `Refund [src:${req.sourceId}] on [src:${req.invoiceId}] ($${(Number(req.amountCents) / 100).toFixed(2)}) rejected by human approver.`
+						: `Refund [src:${req.sourceId}] on [src:${req.invoiceId}] ($${(Number(req.amountCents) / 100).toFixed(2)}) approved and executed.`,
+				}),
+			]
+		}
+
 		// Planted hallucination trap + concurrent CAS write-skew on concurrent refund requests
 		if (req?.kind === "refund") {
 			const invoiceId = String(req.invoiceId)
@@ -409,8 +422,55 @@ export class MockInferenceRunner implements InferenceRunner {
 		const req = payload.request as Record<string, any> | undefined
 		const vendor = payload.vendor as Record<string, any> | undefined
 		const duplicateOf = payload.duplicateOf as Record<string, any> | undefined
+		const currencyMismatch = payload.currencyMismatch as { invoice: Record<string, any>; transaction: Record<string, any> } | undefined
+		const overpayment = payload.overpayment as
+			| { invoice: Record<string, any>; transaction: Record<string, any>; excessCents: number }
+			| undefined
 
 		if (previousCalls.length === 0) {
+			if (currencyMismatch) {
+				const mInv = currencyMismatch.invoice
+				const mTx = currencyMismatch.transaction
+				return [
+					FunctionCallItem.rehydrate({
+						callId: `call-risk-curr-${mTx.sourceId}-${Date.now()}`,
+						name: "flag_risk",
+						args: JSON.stringify({
+							invoiceId: mInv.sourceId,
+							riskFlag: "CURRENCY_MISMATCH",
+							severity: "HIGH",
+							reason: `${mTx.sourceId} settled in ${mTx.currency} while ${mInv.sourceId} is billed in ${mInv.currency} ($${(Number(mInv.amountCents) / 100).toFixed(2)}).`,
+							citations: [
+								{ sourceId: mInv.sourceId, field: "currency", expectedValue: mInv.currency },
+								{ sourceId: mTx.sourceId, field: "currency", expectedValue: mTx.currency },
+								{ sourceId: mInv.sourceId, field: "amountCents", expectedValue: mInv.amountCents },
+							],
+						}),
+					}),
+				]
+			}
+
+			if (overpayment) {
+				const oInv = overpayment.invoice
+				const oTx = overpayment.transaction
+				return [
+					FunctionCallItem.rehydrate({
+						callId: `call-risk-over-${oTx.sourceId}-${Date.now()}`,
+						name: "flag_risk",
+						args: JSON.stringify({
+							invoiceId: oInv.sourceId,
+							riskFlag: "OVERPAYMENT_ANOMALY",
+							severity: "HIGH",
+							reason: `${oTx.sourceId} ($${(Number(oTx.amountCents) / 100).toFixed(2)}) overpays ${oInv.sourceId} ($${(Number(oInv.amountCents) / 100).toFixed(2)}) by $${(overpayment.excessCents / 100).toFixed(2)}.`,
+							citations: [
+								{ sourceId: oInv.sourceId, field: "amountCents", expectedValue: oInv.amountCents },
+								{ sourceId: oTx.sourceId, field: "amountCents", expectedValue: oTx.amountCents },
+							],
+						}),
+					}),
+				]
+			}
+
 			if (inv && duplicateOf) {
 				return [
 					FunctionCallItem.rehydrate({
@@ -471,6 +531,24 @@ export class MockInferenceRunner implements InferenceRunner {
 			}
 		}
 
+		if (currencyMismatch) {
+			const mInv = currencyMismatch.invoice
+			const mTx = currencyMismatch.transaction
+			return [
+				ModelMessageItem.rehydrate({
+					text: `Flagged currency mismatch between [src:${mInv.sourceId}] (${mInv.currency}) and [src:${mTx.sourceId}] (${mTx.currency}) ($${(Number(mInv.amountCents) / 100).toFixed(2)}).`,
+				}),
+			]
+		}
+		if (overpayment) {
+			const oInv = overpayment.invoice
+			const oTx = overpayment.transaction
+			return [
+				ModelMessageItem.rehydrate({
+					text: `Flagged overpayment anomaly: [src:${oTx.sourceId}] ($${(Number(oTx.amountCents) / 100).toFixed(2)}) exceeds [src:${oInv.sourceId}] ($${(Number(oInv.amountCents) / 100).toFixed(2)}).`,
+				}),
+			]
+		}
 		if (inv && duplicateOf) {
 			return [
 				ModelMessageItem.rehydrate({
