@@ -587,7 +587,7 @@ export class SessionController {
 		return this.state.auditLog.map((e) => JSON.stringify(e)).join("\n") + (this.state.auditLog.length ? "\n" : "")
 	}
 
-	getSnapshot() {
+	getSnapshot(options: { full?: boolean } = {}) {
 		const live = resolveLiveProviderFromEnv()
 		const inv1007 = this.state.getCell("INV-1007")?.read().value
 		const canInjectLateSettlement =
@@ -597,9 +597,10 @@ export class SessionController {
 			!this.lateSettlementInjected &&
 			Boolean(inv1007?.drafts.some((d) => d.status === "ACTIVE"))
 
-		const snapshotState = this.isContinuousStream
-			? this.state.toSnapshot({ maxCells: 60, maxSpans: 60, maxAudit: 120, newestFirst: true })
-			: this.state.toSnapshot()
+		const snapshotState =
+			this.isContinuousStream && !options.full
+				? this.state.toSnapshot({ maxCells: 60, maxSpans: 60, maxAudit: 120, newestFirst: true })
+				: this.state.toSnapshot()
 
 		return {
 			runId: this.runId,

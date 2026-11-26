@@ -81,7 +81,7 @@ async function runLiveContinuousStream(
 		throw new Error(res.error)
 	}
 
-	const deadline = Date.now() + 180_000
+	const deadline = Date.now() + 300_000
 	while (Date.now() < deadline) {
 		const snap = controller.getSnapshot()
 		if (snap.stream.tickCount >= maxTicks || snap.llmBudgetExhausted) {
@@ -96,13 +96,17 @@ async function runLiveContinuousStream(
 	await controller.waitForCurrentIdle(60000)
 	unsub()
 
-	const finalSnap = controller.getSnapshot()
+	const finalSnap = controller.getSnapshot({ full: true })
 	const statusCounts: Record<string, number> = {}
+	const unfinishedIds: string[] = []
 	for (const cell of finalSnap.cells) {
 		statusCounts[cell.record.status] = (statusCounts[cell.record.status] ?? 0) + 1
+		if (cell.record.status === "OPEN" || cell.record.status === "PARTIAL") {
+			unfinishedIds.push(`${cell.record.invoiceId}(${cell.record.status})`)
+		}
 	}
 
-	console.log("\n=== LIVE 40-TICK RANDOMIZED STREAM SUMMARY ===")
+	console.log(`\n=== LIVE ${maxTicks}-TICK RANDOMIZED STREAM SUMMARY ===`)
 	console.log(`Seed                  : ${finalSnap.stream.seed}`)
 	console.log(`Ticks generated       : ${finalSnap.stream.tickCount} (${finalSnap.stream.trapsInjected} scenario injections)`)
 	console.log(`Total ledger invoices : ${finalSnap.totalCellsCount}`)
@@ -116,6 +120,7 @@ async function runLiveContinuousStream(
 	console.log(`Stale invalidations   : ${finalSnap.metrics.staleInvalidations}`)
 	console.log(`Human HITL routed     : ${finalSnap.metrics.humanApprovalsRouted}`)
 	console.log(`Unmatched orphan TXs  : ${finalSnap.unmatchedTxIds.join(", ") || "none"}`)
+	console.log(`Unfinished invoices   : ${unfinishedIds.join(", ") || "none"}`)
 	console.log(`Invoice statuses      : ${JSON.stringify(statusCounts)}`)
 	console.log(`Scenario breakdown    : ${JSON.stringify(trapCounts)}`)
 
