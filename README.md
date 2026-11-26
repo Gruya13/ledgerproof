@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Gruya13/ledgerproof/actions/workflows/ci.yml/badge.svg)](https://github.com/Gruya13/ledgerproof/actions/workflows/ci.yml)
 
-**Concurrent, Evidence-First Black Friday Reconciliation & Controlled Payout System on Mozaik (`@mozaik-ai/core@6.0.0`)**
+**LedgerProof reconciles high-volume Black Friday payments across concurrent Mozaik agents (`@mozaik-ai/core@6.0.0`) — settling clean invoices deterministically with zero LLM tokens while mechanically blocking hallucinated numbers, write-skew refunds, and spoofed BEC IBAN payouts mid-loop.**
 
 > **Compliance Notice:** LedgerProof uses **100% synthetic financial data** for demonstration only. Output is **not financial advice**.
 
@@ -13,7 +13,7 @@
 LedgerProof unifies three Traditional Finance workflows from the hackathon brief on a reactive multi-agent event bus:
 1. **Reconciliation & Exception Resolution** — deterministic `StrictMatcher` settles clean 1:1 invoices with `0` LLM tokens, while `Reconciler` handles split/partial payments and memo typos (`TX-2006 + TX-2007 → INV-1006`).
 2. **Risk Investigation & Duplicate/BEC Guard** — `RiskSentinel` runs concurrently to lock duplicate invoices (`INV-1009`), BEC vendor IBAN changes (`REQ-3002`), currency mismatches, overpayment anomalies, and Black Friday velocity fraud alerts (`TX-2016`).
-3. **Controlled SEPA `pain.001` Payout & Refund Routing** — `PayoutAndRefund` enforces EUR-only SEPA rails (`SEPA_REQUIRES_EUR`) and ISO 13616 mod-97 IBAN checksums, respects spending limits (`$250` / `€250` auto-approve threshold), generates downloadable **ISO 20022 `pain.001.001.09` XML** synthetic demo drafts (using `<DbtrAgt>` `NOTPROVIDED` and full 64-char SHA-256 digests via `GET /api/sepa/:invoiceId.xml` — not bank-validated or XSD-submitted), and routes high-risk or over-limit transfers through human approval without pausing peer Mozaik loops.
+3. **Controlled SEPA & Refund Routing (plus Optional `pain.001` Draft Export)** — `PayoutAndRefund` enforces EUR-only SEPA rails (`SEPA_REQUIRES_EUR`) and ISO 13616 mod-97 IBAN checks under a `25,000` minor-unit auto-approve limit (`€250` EUR / `$250` USD, no FX conversion), routes high-risk/over-limit payouts through non-blocking human approval, and exports downloadable **ISO 20022 `pain.001.001.09` XML** synthetic demo drafts (`<DbtrAgt>` `NOTPROVIDED`, 64-char SHA-256 via `GET /api/sepa/:invoiceId.xml` — not bank/XSD validated).
 
 Every financial conclusion and tool call is mechanically gated by **`ProofGate`** (`InterceptionHandler`):
 - **L1 Source, Currency & Math Gate:** blocks uncited or invented amounts, raw integer `amountCents` mislabeled as USD/EUR, non-EUR SEPA payouts, and invalid IDs mid-loop (`inventedNumbersLeaked = 0`).
@@ -39,7 +39,7 @@ Each concurrent `runLoop(...)` receives a fresh isolated `ModelContext` and its 
 
 ---
 
-## Quick Start (Zero API Key Required)
+## 60-Second Judge Walkthrough (Zero API Key Required)
 
 ```bash
 npm install
@@ -47,10 +47,9 @@ npm run ui
 ```
 
 Open **http://localhost:4317** in your browser and click **Start Interactive Stream**:
-1. Watch the **Concurrent Mozaik Agent Swimlanes** execute in real time.
-2. Notice **ProofGate L3 HITL** pauses only `REQ-3002` (`€640.00` BEC IBAN mismatch on `INV-1010`) while peer invoices converge concurrently — click **Reject (Lock HOLD_RISK)** (or **Approve Execution**).
-3. Click **Inject Late Settlement (TX-2017)** to watch `INV-1007` close and its active overdue chase draft flip automatically to **`STALE`**.
-4. Inspect **Blocked / Rejected Claims** (L1 hallucination `$319.99 / TX-9999` + L2 CAS write-skew catch on `INV-1011`), click any `[src:ID]` pill to verify its `SHA-256` source record, or click **Preview pain.001** / **Download XML** on any `SEPA_DRAFT_READY` row (`INV-1001`, `INV-1012`).
+1. **The "Wow" Moment — Non-Blocking BEC HITL:** Watch the **Concurrent Mozaik Agent Swimlanes** run in parallel. `ProofGate` pauses **only** `REQ-3002` (`€640.00` spoofed vendor IBAN on `INV-1010`) for human review while all other invoices converge concurrently — click **Reject (Lock HOLD_RISK)**.
+2. **Causal `STALE` Invalidation:** Click **Inject Late Settlement (TX-2017)** to watch `INV-1007` close and its active overdue chase draft flip automatically to **`STALE`**.
+3. **Evidence & Catches:** Open **Blocked / Rejected Claims** (L1 hallucination `$319.99 / TX-9999` + L2 CAS write-skew catch on `INV-1011`), click any `[src:ID]` pill to verify its `SHA-256` source record, or optionally **Preview pain.001** on `SEPA_DRAFT_READY` rows (`INV-1001`, `INV-1012`).
 
 ### Automated Proof, CLI Demo & Continuous Stream
 
@@ -64,7 +63,7 @@ npm run typecheck                           # TypeScript check for both backend 
 
 ### Continuous Chaos Stream Mode (Web UI & CLI)
 
-In the Web UI (`npm run ui`) or CLI (`--stream`), **ContinuousStreamGenerator** emits synthetic Black Friday invoices, payments, and SEPA requests (`INV-2001+`, `TX-5001+`, `REQ-6001+`) continuously with varied dynamic dollar amounts while periodically (or on-demand via **Inject Trap Now**) injecting 11 scenarios — both real traps and benign false-positive tests:
+In the Web UI (`npm run ui`) or CLI (`--stream`), **ContinuousStreamGenerator** emits synthetic Black Friday invoices, payments, and payout requests (`INV-2001+`, `TX-5001+`, `REQ-6001+`) continuously with varied multi-currency amounts (**EUR** for SEPA payouts, **USD** for card/wire/refund flows) while periodically (or on-demand via **Inject Trap Now**) injecting 11 scenarios — both real traps and benign false-positive tests:
 - **Real Traps:** `split_typo`, `partial_late_stale`, `duplicate_invoice`, `orphan_wire`, `bec_iban_change` (non-blocking HITL pause), `write_skew_race` (L1 + L2 CAS interlock), `currency_mismatch`, and `overpayment_anomaly`.
 - **Benign / False-Positive Tests:** `legit_high_value_sepa` (including spaced IBAN normalization), `legit_high_value_refund` (`0` risk flags — safe to approve), and `false_positive_near_duplicate` (same vendor & amount, different PO).
 - In **Live LLM Mode**, a built-in `maxLlmCalls` budget guard (`default: 40`) auto-pauses the stream before runaway API usage while deterministic `StrictMatcher` ticks still cost `0` LLM calls.
@@ -79,6 +78,14 @@ Copy `.env.example` to `.env` and set **any one** provider key (`DEEPSEEK_API_KE
 npm start   # CLI live run
 npm run ui  # Toggle "Live" mode in the Web UI header
 ```
+
+---
+
+## Limitations & What `ProofGate` Does Not Catch
+
+- **Synthetic test suites vs. open-ended production drift:** `MockInferenceRunner` runs (`12/12` ground-truth, `npm test`) are repeatable deterministic regression proofs against self-authored test scenarios. Live LLM stress runs (`deepseek-chat`) exercise unscripted model behavior (e.g., catching an unscripted `$28,865.00` vs `$288.65` scale error on `TX-5013` in `REJ-2`).
+- **Formal grounding vs. semantic business judgment:** `ProofGate` guarantees source existence, arithmetic consistency, currency/IBAN/vendor bindings, and CAS version freshness. A formally cited claim that misinterprets an unambiguous memo still requires **`SkepticAuditor`** adversarial review and **`L3 HITL`** escalation.
+- **No live FX conversion & synthetic XML drafts:** Cross-currency transfers are flagged (`CURRENCY_MISMATCH`) rather than converted using live FX rates; auto-approve thresholds (`25,000` minor units: `€250` EUR / `$250` USD) are compared per currency; and `pain.001.001.09` XML outputs use synthetic `<DbtrAgt>` (`NOTPROVIDED`) and are not externally XSD-validated or bank-submitted.
 
 ---
 
