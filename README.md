@@ -84,9 +84,12 @@ npm run ui  # Toggle "Live" mode in the Web UI header
 
 ## Verified Benchmark & Live Stress-Test Results
 
+Full per-run tables, per-seed metrics, scenario distributions, and engineering notes are documented in **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)**.
+
 | Run | Mode / Seed | Scale | Concurrency & Loops | 0-Token Strict Matches | ProofGate Catches & Invariants |
 |---|---|---|---|---|---|
 | `npm test` | `MockInferenceRunner` + HTTP/SSE + Unit | `9` suites / `26` tests | Full concurrent E2E & stream | Deterministic pass | `inventedNumbersLeaked = 0`, L1 IBAN/vendor/kind/citation binding, IBAN mod-97, immutable `SourceStore`, post-HITL staleness, refund balance, `<DbtrAgt>` XML |
 | `npm run proof` | `MockInferenceRunner` (fixed pack) | `12/12` invoices | `18` peak concurrent, `22/22` finished | `10` | `1` CAS conflict stopped, `1` L1 blocked, `1` `STALE`, `1` HITL, `0` leaked |
+| `npm start` (`3×` runs, `0f1046d`) | Live `deepseek-chat` (fixed pack) | `36/36` GT invoices (`3×12`) | `21` max peak, `66/66` finished | Deterministic path + `1` CAS each | `3/3` CAS stopped (`INV-1011`), `3/3` `STALE` (`INV-1007`), `3/3` BEC HITL rejected (`REQ-3002`), `0` leaked |
 | `npm start -- --stream --ticks 80` | Live `deepseek-chat`, seed `2811646950` | `80` ticks (`26` traps), `83/83` invoices closed | `12` peak concurrent, `99/99` finished | `74` | Live L1 catch `REJ-2` (`$28,865.00` vs `$288.65` on `TX-5013`), `10` HITL, `2` `STALE`, `0` leaked |
-| `npm start -- --stream --ticks 10` | Live `deepseek-chat`, seed `916840450` | `10` ticks (`3` traps), `9/9` invoices closed | `9` peak concurrent, `14/14` finished | `8` | `1` live L2 CAS write-skew stopped (`INV-2003`), `3` EUR `pain.001` drafts, `0` false L1 blocks, `0` leaked |
+| `10×60` Chaos Sweep (`0f1046d`) | Live `deepseek-chat`, `10` seeds (`10×60`) | `600` ticks (`200` scenarios), `614` invoices | `16` max peak, `745/745` finished | `536` | `59` L1 blocked (`0` leaked), `3` L2 CAS stopped, `135` SEPA `pain.001` XML, `71` HITL, `14` `STALE` (`10/10` runs OK) |
