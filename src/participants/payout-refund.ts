@@ -60,20 +60,24 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 			citations: Citation[]
 		}) => {
 			const state = rt.resolveRuntime().state
-			const cell = state.getCell(args.invoiceId)
-			if (!cell) return { ok: false, reason: "Unknown invoice" }
-
-			const inv = state.sourceStore.getInvoice(args.invoiceId)
-			const req = state.sourceStore.getRequest(args.requestId)
-			const vendor = state.sourceStore.getVendor(args.vendorId)
-			if (!inv || !req || !vendor) {
-				return { ok: false, reason: "Missing invoice, request, or vendor source record for SEPA XML generation" }
+			const grant = state.consumeExecutionGrant("propose_sepa_payout", args.requestId)
+			if (!grant) {
+				return { ok: false, reason: "Missing ProofGate execution grant for propose_sepa_payout" }
 			}
 
-			const snap = cell.read()
-			const approvedBy = args.amountCents > state.spendingLimitCents ? "HUMAN" : "AUTO_POLICY"
-			const casVersion = approvedBy === "HUMAN" ? snap.version : (args.expectedVersion ?? snap.version)
-			const normalizedIban = normalizeIban(args.targetIban)
+			const cell = state.getCell(grant.invoiceId)
+			if (!cell) return { ok: false, reason: "Unknown invoice" }
+
+			const inv = state.sourceStore.getInvoice(grant.invoiceId)
+			const req = state.sourceStore.getRequest(grant.requestId)
+			const vendor = req ? state.sourceStore.getVendor(req.vendorId) : undefined
+			if (!inv || !req || !vendor || !req.targetIban) {
+				return { ok: false, reason: "Missing invoice, request, vendor, or targetIban in SourceStore for SEPA XML generation" }
+			}
+
+			const approvedBy = grant.approvedBy
+			const casVersion = grant.approvedVersion
+			const normalizedIban = normalizeIban(req.targetIban)
 			const artifact = generateSepaPain001Draft({
 				invoice: inv,
 				vendor,
@@ -86,8 +90,8 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 				...cur,
 				status: "SEPA_DRAFT_READY",
 				sepaDraft: {
-					requestId: args.requestId,
-					amountCents: args.amountCents,
+					requestId: req.sourceId,
+					amountCents: req.amountCents,
 					currency: inv.currency,
 					targetIban: normalizedIban,
 					approvedBy,
@@ -96,7 +100,7 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 				},
 				notes: [
 					...cur.notes,
-					`SEPA pain.001 draft ${args.requestId} (${formatMoney(args.amountCents, inv.currency)}, ${approvedBy}, msgId=${artifact.messageId})`,
+					`SEPA pain.001 draft ${req.sourceId} (${formatMoney(req.amountCents, inv.currency)}, ${approvedBy}, msgId=${artifact.messageId})`,
 				],
 			}))
 
@@ -106,22 +110,23 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 			}
 
 			state.setSepaDraftXml(artifact)
-			state.logAudit("sepa.pain001_generated", "PayoutAndRefund", args.invoiceId, {
-				requestId: args.requestId,
+			state.logAudit("sepa.pain001_generated", "PayoutAndRefund", inv.sourceId, {
+				requestId: req.sourceId,
+				approvedBy,
 				messageId: artifact.messageId,
 				xmlSha256: artifact.sha256,
 				currency: inv.currency,
-				amountCents: args.amountCents,
+				amountCents: req.amountCents,
 			})
 
 			const claim: ClaimRecord = {
-				claimId: `CLM-${args.requestId}`,
-				invoiceId: args.invoiceId,
+				claimId: `CLM-${req.sourceId}`,
+				invoiceId: inv.sourceId,
 				producer: "PayoutAndRefund",
 				kind: "SEPA_DRAFT",
-				amountCents: args.amountCents,
+				amountCents: req.amountCents,
 				currency: inv.currency,
-				summary: `SEPA pain.001 draft ${args.requestId} ready for ${args.invoiceId} (${formatMoney(args.amountCents, inv.currency)}, ${approvedBy})`,
+				summary: `SEPA pain.001 draft ${req.sourceId} ready for ${inv.sourceId} (${formatMoney(req.amountCents, inv.currency)}, ${approvedBy})`,
 				citations: args.citations,
 				auditStatus: "PENDING",
 				createdAt: new Date().toISOString(),
@@ -165,32 +170,38 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 			citations: Citation[]
 		}) => {
 			const state = rt.resolveRuntime().state
-			const cell = state.getCell(args.invoiceId)
-			if (!cell) return { ok: false, reason: "Unknown invoice" }
+			const grant = state.consumeExecutionGrant("propose_refund", args.requestId)
+			if (!grant) {
+				return { ok: false, reason: "Missing ProofGate execution grant for propose_refund" }
+			}
+
+			const cell = state.getCell(grant.invoiceId)
+			const req = state.sourceStore.getRequest(grant.requestId)
+			if (!cell || !req) return { ok: false, reason: "Unknown invoice or request" }
+
 			const snap = cell.read()
-			const isHumanApproved =
-				args.amountCents > state.spendingLimitCents &&
-				!snap.value.riskFlags.includes("FRAUD_VELOCITY") &&
-				!snap.value.riskFlags.includes("DUPLICATE_INVOICE")
-			const casVersion = isHumanApproved ? snap.version : (args.expectedVersion ?? snap.version)
-			const casRes = cell.casWrite(casVersion, (cur) => ({
+			if (snap.value.status === "REFUNDED" || req.amountCents > snap.value.paidAmountCents) {
+				return { ok: false, reason: "Refund violates paid-balance or duplicate-refund invariant" }
+			}
+
+			const casRes = cell.casWrite(grant.approvedVersion, (cur) => ({
 				...cur,
 				status: "REFUNDED",
-				notes: [...cur.notes, `Refund ${args.requestId} executed`],
+				notes: [...cur.notes, `Refund ${req.sourceId} executed (${grant.approvedBy})`],
 			}))
 			if (!casRes.ok) {
 				state.metrics.casConflictsPrevented += 1
 				return { ok: false, reason: "cas.rejected" }
 			}
-			const invCurrency = state.sourceStore.getInvoice(args.invoiceId)?.currency ?? snap.value.currency
+			const invCurrency = state.sourceStore.getInvoice(grant.invoiceId)?.currency ?? snap.value.currency
 			const claim: ClaimRecord = {
-				claimId: `CLM-${args.requestId}`,
-				invoiceId: args.invoiceId,
+				claimId: `CLM-${req.sourceId}`,
+				invoiceId: grant.invoiceId,
 				producer: "PayoutAndRefund",
 				kind: "REFUND",
-				amountCents: args.amountCents,
+				amountCents: req.amountCents,
 				currency: invCurrency,
-				summary: args.reason ?? `Refund ${args.requestId}`,
+				summary: args.reason ?? `Refund ${req.sourceId}`,
 				citations: args.citations,
 				auditStatus: "PENDING",
 				createdAt: new Date().toISOString(),

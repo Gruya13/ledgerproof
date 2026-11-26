@@ -99,7 +99,7 @@ describe("HTTP & SSE Server API interactive flow", () => {
 		const srcRes = await fetch(`${baseUrl}/api/source/INV-1010`)
 		expect(srcRes.status).toBe(200)
 		const srcJson = (await srcRes.json()) as any
-		expect(srcJson.entity.sha256).toBeTruthy()
+		expect(srcJson.entity.sha256).toMatch(/^[0-9a-f]{64}$/)
 		expect(srcJson.entity.data.amountCents).toBe(64000)
 
 		const jsonlRes = await fetch(`${baseUrl}/api/audit.jsonl`)
@@ -113,7 +113,7 @@ describe("HTTP & SSE Server API interactive flow", () => {
 		const xmlRes = await fetch(`${baseUrl}/api/sepa/INV-1012.xml`)
 		expect(xmlRes.status).toBe(200)
 		expect(xmlRes.headers.get("content-type")).toContain("application/xml")
-		expect(xmlRes.headers.get("x-ledgerproof-sha256")).toBeTruthy()
+		expect(xmlRes.headers.get("x-ledgerproof-sha256")).toMatch(/^[0-9a-f]{64}$/)
 		const xmlBody = await xmlRes.text()
 		expect(xmlBody).toContain("urn:iso:std:iso:20022:tech:xsd:pain.001.001.09")
 		expect(xmlBody).toContain("SYNTHETIC TEST DATA")

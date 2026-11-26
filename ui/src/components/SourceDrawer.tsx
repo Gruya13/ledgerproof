@@ -51,8 +51,8 @@ export function SourceDrawer({ selectedSource, selectedSepaXml, loading, error, 
 							<strong className="mono">{selectedSepaXml.invoiceId}</strong> · {selectedSepaXml.messageId}
 						</span>
 						<div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-							<span className="mono" style={{ color: "#6ee7b7" }}>
-								sha256:{selectedSepaXml.sha256}
+							<span className="mono" style={{ color: "#6ee7b7" }} title={selectedSepaXml.sha256}>
+								sha256:{selectedSepaXml.sha256.slice(0, 16)}…
 							</span>
 							<a
 								className="src-pill mono"
@@ -71,8 +71,8 @@ export function SourceDrawer({ selectedSource, selectedSepaXml, loading, error, 
 						<span>
 							<strong className="mono">{selectedSource.sourceId}</strong> ({selectedSource.entity.kind})
 						</span>
-						<span className="mono" style={{ color: "#6ee7b7" }}>
-							sha256:{selectedSource.entity.sha256}
+						<span className="mono" style={{ color: "#6ee7b7" }} title={selectedSource.entity.sha256}>
+							sha256:{selectedSource.entity.sha256.slice(0, 16)}…
 						</span>
 					</div>
 					<pre className="source-json mono">

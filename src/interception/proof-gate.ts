@@ -9,8 +9,26 @@ import {
 } from "@mozaik-ai/core"
 import type { LedgerRuntimeApi } from "../runtime"
 import { formatMoney } from "../engine/currency"
-import { verifyMessageCitations, verifyToolProposal, type ToolProposalArgs } from "../engine/proof-verifier"
+import {
+	normalizeIban,
+	verifyMessageCitations,
+	verifyToolProposal,
+	type ToolProposalArgs,
+} from "../engine/proof-verifier"
 import type { PendingApproval, RiskFlag } from "../types"
+
+export { normalizeIban }
+
+const HARD_RISK_FLAGS: readonly RiskFlag[] = [
+	"FRAUD_VELOCITY",
+	"DUPLICATE_INVOICE",
+	"CURRENCY_MISMATCH",
+	"OVERPAYMENT_ANOMALY",
+]
+
+function hasHardRiskFlag(flags: readonly RiskFlag[]): boolean {
+	return flags.some((flag) => HARD_RISK_FLAGS.includes(flag))
+}
 
 function parseArgs(raw: string): unknown {
 	try {
@@ -18,10 +36,6 @@ function parseArgs(raw: string): unknown {
 	} catch {
 		return undefined
 	}
-}
-
-export function normalizeIban(iban: string): string {
-	return iban.replace(/\s+/g, "").toUpperCase()
 }
 
 export class ProofGateInterceptionHandler implements InterceptionHandler {
@@ -130,15 +144,103 @@ export class ProofGateInterceptionHandler implements InterceptionHandler {
 
 			const snap = cell.read()
 			const req = args.requestId ? state.sourceStore.getRequest(args.requestId) : undefined
-			const vendor = req ? state.sourceStore.getVendor(req.vendorId) : undefined
+			if (!req) {
+				return this.rejectToolCall(
+					call,
+					inferenceInput,
+					JSON.stringify({
+						ok: false,
+						blockedBy: "ProofGate-L2",
+						code: "MISSING_REQUEST",
+						reason: `${call.name} requires a valid PaymentRequest`,
+					}),
+				)
+			}
+
+			if (call.name === "propose_refund") {
+				if (snap.value.status === "REFUNDED") {
+					state.metrics.uncitedNumbersBlocked += 1
+					const rejection = state.recordRejection({
+						level: "L1_SOURCE_OR_MATH",
+						code: "ALREADY_REFUNDED",
+						agentName: this.agentName,
+						actionName: call.name,
+						reason: `Invoice ${args.invoiceId} is already REFUNDED`,
+						rawArgs: parsed,
+					})
+					this.rt.sendEvent(SemanticEvent.create("proof.blocked", this.agentId, rejection), this.agentId)
+					return this.rejectToolCall(
+						call,
+						inferenceInput,
+						JSON.stringify({
+							ok: false,
+							blockedBy: "ProofGate-L1",
+							code: "ALREADY_REFUNDED",
+							reason: rejection.reason,
+						}),
+					)
+				}
+				if (snap.value.paidAmountCents <= 0 || req.amountCents > snap.value.paidAmountCents) {
+					state.metrics.uncitedNumbersBlocked += 1
+					const rejection = state.recordRejection({
+						level: "L1_SOURCE_OR_MATH",
+						code: "REFUND_EXCEEDS_PAID",
+						agentName: this.agentName,
+						actionName: call.name,
+						reason: `Refund ${req.sourceId} (${req.amountCents} cents) exceeds settled paidAmountCents (${snap.value.paidAmountCents} cents) on ${args.invoiceId}`,
+						rawArgs: parsed,
+					})
+					this.rt.sendEvent(SemanticEvent.create("proof.blocked", this.agentId, rejection), this.agentId)
+					return this.rejectToolCall(
+						call,
+						inferenceInput,
+						JSON.stringify({
+							ok: false,
+							blockedBy: "ProofGate-L1",
+							code: "REFUND_EXCEEDS_PAID",
+							reason: rejection.reason,
+						}),
+					)
+				}
+			}
+
+			if (call.name === "propose_sepa_payout" && snap.value.status === "SEPA_DRAFT_READY") {
+				state.metrics.casConflictsPrevented += 1
+				const rejection = state.recordRejection({
+					level: "L2_CAS_WRITE_SKEW",
+					code: "SEPA_ALREADY_DRAFTED",
+					agentName: this.agentName,
+					actionName: call.name,
+					reason: `Invoice ${args.invoiceId} already has SEPA_DRAFT_READY`,
+					rawArgs: parsed,
+				})
+				this.rt.sendEvent(
+					SemanticEvent.create("conflict.prevented", this.agentId, {
+						invoiceId: args.invoiceId,
+						requestId: req.sourceId,
+						rejection,
+					}),
+					this.agentId,
+				)
+				return this.rejectToolCall(
+					call,
+					inferenceInput,
+					JSON.stringify({
+						ok: false,
+						blockedBy: "ProofGate-L2-CAS",
+						code: "SEPA_ALREADY_DRAFTED",
+						reason: rejection.reason,
+					}),
+				)
+			}
+
+			const vendor = state.sourceStore.getVendor(req.vendorId)
 			const ibanMismatch =
-				Boolean(req?.targetIban) &&
+				Boolean(req.targetIban) &&
 				Boolean(vendor?.masterIban) &&
-				normalizeIban(req!.targetIban!) !== normalizeIban(vendor!.masterIban)
-			const overLimit = (args.amountCents ?? 0) > state.spendingLimitCents
-			const hasHardRiskBlock =
-				snap.value.riskFlags.includes("FRAUD_VELOCITY") ||
-				snap.value.riskFlags.includes("DUPLICATE_INVOICE")
+				normalizeIban(req.targetIban!) !== normalizeIban(vendor!.masterIban)
+			const overLimit = req.amountCents > state.spendingLimitCents
+			const hasHardRiskBlock = hasHardRiskFlag(snap.value.riskFlags)
 
 			// A concurrent state change on non-IBAN-policy cases (e.g. fraud/duplicate lock or stale version) is a CAS write-skew.
 			const versionStale = args.expectedVersion !== undefined && args.expectedVersion !== snap.version
@@ -276,6 +378,101 @@ export class ProofGateInterceptionHandler implements InterceptionHandler {
 						}),
 					)
 				}
+
+				const postSnap = cell.read()
+				const postReq = state.sourceStore.getRequest(req.sourceId)
+				const ibanStillMatches =
+					call.name !== "propose_sepa_payout" ||
+					(Boolean(postReq?.targetIban) &&
+						Boolean(req.targetIban) &&
+						normalizeIban(postReq!.targetIban!) === normalizeIban(req.targetIban!))
+				const hardRiskNow = hasHardRiskFlag(postSnap.value.riskFlags)
+				const onlyBecRiskFlags =
+					postSnap.value.riskFlags.length > 0 && postSnap.value.riskFlags.every((f) => f === "BEC_IBAN_CHANGE")
+				const incompatibleStatus =
+					postSnap.value.status === "DUPLICATE" ||
+					postSnap.value.status === "REFUNDED" ||
+					postSnap.value.status === "SEPA_DRAFT_READY" ||
+					(postSnap.value.status === "HOLD_RISK" &&
+						!(call.name === "propose_sepa_payout" && ibanMismatch && onlyBecRiskFlags))
+				const allowedBecVersionBump =
+					call.name === "propose_sepa_payout" &&
+					ibanMismatch &&
+					onlyBecRiskFlags &&
+					postSnap.value.paidAmountCents === snap.value.paidAmountCents &&
+					postSnap.value.expectedAmountCents === snap.value.expectedAmountCents
+				const staleVersionChanged = postSnap.version !== snap.version && !allowedBecVersionBump
+				const refundStillValid =
+					call.name !== "propose_refund" ||
+					(req.amountCents <= postSnap.value.paidAmountCents && postSnap.value.status !== "REFUNDED")
+
+				if (
+					!postReq ||
+					postReq.amountCents !== req.amountCents ||
+					!ibanStillMatches ||
+					hardRiskNow ||
+					incompatibleStatus ||
+					staleVersionChanged ||
+					!refundStillValid
+				) {
+					state.metrics.casConflictsPrevented += 1
+					const staleReason = `Post-HITL state invalidated ${args.invoiceId}: status=${postSnap.value.status}, riskFlags=[${postSnap.value.riskFlags.join(", ")}], version=${postSnap.version} (approved at v${snap.version})`
+					const rejection = state.recordRejection({
+						level: "L2_CAS_WRITE_SKEW",
+						code: "STALE_POST_HITL_STATE",
+						agentName: this.agentName,
+						actionName: call.name,
+						reason: staleReason,
+						rawArgs: parsed,
+					})
+					state.logAudit("hitl.stale_rejected", this.agentName, args.invoiceId, {
+						requestId: req.sourceId,
+						approvedAtVersion: snap.version,
+						currentVersion: postSnap.version,
+						status: postSnap.value.status,
+						riskFlags: postSnap.value.riskFlags,
+					})
+					this.rt.sendEvent(
+						SemanticEvent.create("conflict.prevented", this.agentId, {
+							invoiceId: args.invoiceId,
+							requestId: req.sourceId,
+							rejection,
+						}),
+						this.agentId,
+					)
+					return this.rejectToolCall(
+						call,
+						inferenceInput,
+						JSON.stringify({
+							ok: false,
+							blockedBy: "ProofGate-L3-PostHITL",
+							code: "STALE_POST_HITL_STATE",
+							reason: staleReason,
+						}),
+					)
+				}
+
+				state.grantExecution({
+					requestId: req.sourceId,
+					invoiceId: args.invoiceId!,
+					actionName: call.name,
+					approvedBy: "HUMAN",
+					approvedVersion: postSnap.version,
+					amountCents: req.amountCents,
+					targetIban: req.targetIban ? normalizeIban(req.targetIban) : undefined,
+					grantedAt: new Date().toISOString(),
+				})
+			} else {
+				state.grantExecution({
+					requestId: req.sourceId,
+					invoiceId: args.invoiceId!,
+					actionName: call.name,
+					approvedBy: "AUTO_POLICY",
+					approvedVersion: snap.version,
+					amountCents: req.amountCents,
+					targetIban: req.targetIban ? normalizeIban(req.targetIban) : undefined,
+					grantedAt: new Date().toISOString(),
+				})
 			}
 		}
 

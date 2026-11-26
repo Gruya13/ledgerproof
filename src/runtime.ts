@@ -24,6 +24,17 @@ import { VersionedCell } from "./engine/versioned-cell"
 
 export type ApprovalHandler = (approval: PendingApproval) => Promise<ApprovalDecision>
 
+export interface ApprovedExecutionGrant {
+	requestId: string
+	invoiceId: string
+	actionName: "propose_sepa_payout" | "propose_refund"
+	approvedBy: "AUTO_POLICY" | "HUMAN"
+	approvedVersion: number
+	amountCents: number
+	targetIban?: string
+	grantedAt: string
+}
+
 export class ApprovalBroker {
 	private handler: ApprovalHandler
 
@@ -57,6 +68,7 @@ export class LedgerState extends RuntimeState {
 	readonly pendingApprovals = new Map<string, PendingApproval>()
 	readonly sepaDraftXmls = new Map<string, SepaDraftArtifact>()
 	readonly auditLog: AuditEntry[] = []
+	private readonly executionGrants = new Map<string, ApprovedExecutionGrant>()
 	readonly approvalBroker: ApprovalBroker
 	readonly metrics: ConcurrencyMetrics = {
 		activeLoops: 0,
@@ -194,6 +206,22 @@ export class LedgerState extends RuntimeState {
 
 	getSepaDraftXml(invoiceId: string): SepaDraftArtifact | undefined {
 		return this.sepaDraftXmls.get(invoiceId)
+	}
+
+	grantExecution(grant: ApprovedExecutionGrant): void {
+		this.executionGrants.set(`${grant.actionName}:${grant.requestId}`, grant)
+	}
+
+	consumeExecutionGrant(
+		actionName: "propose_sepa_payout" | "propose_refund",
+		requestId: string,
+	): ApprovedExecutionGrant | undefined {
+		const key = `${actionName}:${requestId}`
+		const grant = this.executionGrants.get(key)
+		if (grant) {
+			this.executionGrants.delete(key)
+		}
+		return grant
 	}
 
 	beginExternalWork(): void {

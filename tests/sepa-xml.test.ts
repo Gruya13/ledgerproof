@@ -46,7 +46,7 @@ describe("ISO 20022 SEPA pain.001.001.09 XML generator", () => {
 		})
 
 		expect(artifact.messageId).toBe("LP-REQ-3004-INV-1012")
-		expect(artifact.sha256).toMatch(/^[0-9a-f]{16}$/)
+		expect(artifact.sha256).toMatch(/^[0-9a-f]{64}$/)
 		expect(artifact.xml).toContain('xmlns="urn:iso:std:iso:20022:tech:xsd:pain.001.001.09"')
 		expect(artifact.xml).toContain("SYNTHETIC TEST DATA ONLY - NOT FOR BANKING SUBMISSION")
 		expect(artifact.xml).toContain('<InstdAmt Ccy="EUR">195.00</InstdAmt>')

@@ -10,7 +10,7 @@ import type {
 } from "../types"
 
 function canonicalSha256(value: unknown): string {
-	return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16)
+	return createHash("sha256").update(JSON.stringify(value)).digest("hex")
 }
 
 export class SourceStore {

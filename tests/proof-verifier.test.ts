@@ -80,8 +80,22 @@ describe("ProofVerifier L1 deterministic source & math gates", () => {
 		expect(rawCentsUsd.code).toBe("INVENTED_PROSE_AMOUNT")
 	})
 
-	it("enforces EUR-only rail for propose_sepa_payout", () => {
-		const res = verifyToolProposal(
+	it("enforces request bindings (IBAN, vendor, requestId, kind, and EUR-only SEPA rail)", () => {
+		// 1. Missing requestId on propose_sepa_payout and propose_refund
+		const missingReq = verifyToolProposal(
+			"propose_refund",
+			{
+				invoiceId: "INV-1011",
+				amountCents: 31000,
+				citations: [{ sourceId: "INV-1011", field: "amountCents", expectedValue: 31000 }],
+			},
+			store,
+		)
+		expect(missingReq.ok).toBe(false)
+		expect(missingReq.code).toBe("MISSING_REQUEST_ID")
+
+		// 2. Request kind mismatch (refund request passed to propose_sepa_payout & vice versa)
+		const kindSepaOnRefund = verifyToolProposal(
 			"propose_sepa_payout",
 			{
 				requestId: "REQ-3003",
@@ -96,7 +110,93 @@ describe("ProofVerifier L1 deterministic source & math gates", () => {
 			},
 			store,
 		)
-		expect(res.ok).toBe(false)
-		expect(res.code).toBe("SEPA_REQUIRES_EUR")
+		expect(kindSepaOnRefund.ok).toBe(false)
+		expect(kindSepaOnRefund.code).toBe("REQUEST_KIND_MISMATCH")
+
+		const kindRefundOnSepa = verifyToolProposal(
+			"propose_refund",
+			{
+				requestId: "REQ-3004",
+				invoiceId: "INV-1012",
+				amountCents: 19500,
+				citations: [
+					{ sourceId: "INV-1012", field: "amountCents", expectedValue: 19500 },
+					{ sourceId: "REQ-3004", field: "amountCents", expectedValue: 19500 },
+				],
+			},
+			store,
+		)
+		expect(kindRefundOnSepa.ok).toBe(false)
+		expect(kindRefundOnSepa.code).toBe("REQUEST_KIND_MISMATCH")
+
+		// 3. Target IBAN substitution must be rejected by L1
+		const ibanSub = verifyToolProposal(
+			"propose_sepa_payout",
+			{
+				requestId: "REQ-3004",
+				invoiceId: "INV-1012",
+				vendorId: "VND-06",
+				amountCents: 19500,
+				targetIban: "DE99000000000000000000",
+				citations: [
+					{ sourceId: "INV-1012", field: "amountCents", expectedValue: 19500 },
+					{ sourceId: "REQ-3004", field: "amountCents", expectedValue: 19500 },
+				],
+			},
+			store,
+		)
+		expect(ibanSub.ok).toBe(false)
+		expect(ibanSub.code).toBe("TARGET_IBAN_MISMATCH")
+
+		// 4. Vendor substitution must be rejected by L1
+		const vendorSub = verifyToolProposal(
+			"propose_sepa_payout",
+			{
+				requestId: "REQ-3004",
+				invoiceId: "INV-1012",
+				vendorId: "VND-01",
+				amountCents: 19500,
+				targetIban: "CZ6508000000192000145399",
+				citations: [
+					{ sourceId: "INV-1012", field: "amountCents", expectedValue: 19500 },
+					{ sourceId: "REQ-3004", field: "amountCents", expectedValue: 19500 },
+				],
+			},
+			store,
+		)
+		expect(vendorSub.ok).toBe(false)
+		expect(vendorSub.code).toBe("VENDOR_MISMATCH")
+
+		// 5. USD sepa_payout request must trigger SEPA_REQUIRES_EUR
+		const usdStore = SourceStore.fromPack(loadPack())
+		usdStore.addRequest({
+			sourceId: "REQ-9991",
+			kind: "sepa_payout",
+			invoiceId: "INV-1011",
+			vendorId: "VND-05",
+			amountCents: 31000,
+			currency: "USD",
+			targetIban: "NL91ABNA0417164300",
+			requestedBy: "ap-automation",
+			reason: "Test USD SEPA rejection",
+			concurrentWithAlert: false,
+		})
+		const eurOnly = verifyToolProposal(
+			"propose_sepa_payout",
+			{
+				requestId: "REQ-9991",
+				invoiceId: "INV-1011",
+				vendorId: "VND-05",
+				amountCents: 31000,
+				targetIban: "NL91ABNA0417164300",
+				citations: [
+					{ sourceId: "INV-1011", field: "amountCents", expectedValue: 31000 },
+					{ sourceId: "REQ-9991", field: "amountCents", expectedValue: 31000 },
+				],
+			},
+			usdStore,
+		)
+		expect(eurOnly.ok).toBe(false)
+		expect(eurOnly.code).toBe("SEPA_REQUIRES_EUR")
 	})
 })

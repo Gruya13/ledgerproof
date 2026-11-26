@@ -7,6 +7,10 @@ export interface ProofCheckResult {
 	reason?: string
 }
 
+export function normalizeIban(iban: string): string {
+	return iban.replace(/\s+/g, "").toUpperCase()
+}
+
 export interface ToolProposalArgs {
 	invoiceId?: string
 	txId?: string
@@ -130,18 +134,10 @@ export function verifyToolProposal(
 			return { ok: false, code: "UNKNOWN_INVOICE", reason: `Unknown invoice ${args.invoiceId}` }
 		}
 
-		if (toolName === "propose_sepa_payout") {
-			const req = args.requestId ? sourceStore.getRequest(args.requestId) : undefined
-			if (inv.currency !== "EUR" || (req && req.currency !== "EUR")) {
-				return {
-					ok: false,
-					code: "SEPA_REQUIRES_EUR",
-					reason: `SEPA payout requires EUR currency (invoice ${inv.sourceId} is ${inv.currency}${req ? `, request ${req.sourceId} is ${req.currency}` : ""})`,
-				}
+		if (toolName === "propose_sepa_payout" || toolName === "propose_refund") {
+			if (!args.requestId) {
+				return { ok: false, code: "MISSING_REQUEST_ID", reason: `${toolName} requires requestId` }
 			}
-		}
-
-		if (args.requestId) {
 			const req = sourceStore.getRequest(args.requestId)
 			if (!req) {
 				return { ok: false, code: "UNKNOWN_REQUEST", reason: `Unknown request ${args.requestId}` }
@@ -153,11 +149,57 @@ export function verifyToolProposal(
 					reason: `Request ${req.sourceId} belongs to ${req.invoiceId}, not ${inv.sourceId}`,
 				}
 			}
+			if (req.currency !== inv.currency) {
+				return {
+					ok: false,
+					code: "CURRENCY_MISMATCH",
+					reason: `Request ${req.sourceId} currency (${req.currency}) != invoice ${inv.sourceId} (${inv.currency})`,
+				}
+			}
 			if (args.amountCents !== req.amountCents) {
 				return {
 					ok: false,
 					code: "INVENTED_AMOUNT",
 					reason: `Proposed amountCents (${args.amountCents}) does not match ${req.sourceId}.amountCents (${req.amountCents})`,
+				}
+			}
+
+			if (toolName === "propose_sepa_payout") {
+				if (req.kind !== "sepa_payout") {
+					return {
+						ok: false,
+						code: "REQUEST_KIND_MISMATCH",
+						reason: `Request ${req.sourceId} has kind="${req.kind}", expected "sepa_payout"`,
+					}
+				}
+				if (inv.currency !== "EUR" || req.currency !== "EUR") {
+					return {
+						ok: false,
+						code: "SEPA_REQUIRES_EUR",
+						reason: `SEPA payout requires EUR currency (invoice ${inv.sourceId} is ${inv.currency}, request ${req.sourceId} is ${req.currency})`,
+					}
+				}
+				if (args.vendorId !== req.vendorId || req.vendorId !== inv.vendorId) {
+					return {
+						ok: false,
+						code: "VENDOR_MISMATCH",
+						reason: `Proposed vendorId (${String(args.vendorId)}) does not match ${req.sourceId}/${inv.sourceId} vendor (${req.vendorId})`,
+					}
+				}
+				if (!req.targetIban || !args.targetIban || normalizeIban(args.targetIban) !== normalizeIban(req.targetIban)) {
+					return {
+						ok: false,
+						code: "TARGET_IBAN_MISMATCH",
+						reason: `Proposed targetIban (${String(args.targetIban)}) does not match approved ${req.sourceId}.targetIban (${String(req.targetIban)})`,
+					}
+				}
+			}
+
+			if (toolName === "propose_refund" && req.kind !== "refund") {
+				return {
+					ok: false,
+					code: "REQUEST_KIND_MISMATCH",
+					reason: `Request ${req.sourceId} has kind="${req.kind}", expected "refund"`,
 				}
 			}
 		} else if (toolName === "draft_overdue_chase") {

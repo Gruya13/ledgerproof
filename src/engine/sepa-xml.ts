@@ -122,7 +122,7 @@ export function generateSepaPain001Draft(input: SepaPain001Input): SepaDraftArti
 		"",
 	].join("\n")
 
-	const sha256 = createHash("sha256").update(xml).digest("hex").slice(0, 16)
+	const sha256 = createHash("sha256").update(xml).digest("hex")
 
 	return {
 		invoiceId: input.invoice.sourceId,
