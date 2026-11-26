@@ -37,6 +37,7 @@ export interface StartContinuousStreamOptions {
 	autoApprovePolicy?: boolean
 	maxLlmCalls?: number
 	lateDelayMs?: number
+	seed?: number
 }
 
 export interface SessionLogEntry {
@@ -268,7 +269,7 @@ export class SessionController {
 		this.providerLabel = resolved.label
 		this.logs = []
 		this.status = "RUNNING"
-		this.streamGenerator = new ContinuousStreamGenerator(this.pack.vendors)
+		this.streamGenerator = new ContinuousStreamGenerator(this.pack.vendors, { seed: options.seed })
 
 		const maxLlmCalls =
 			options.maxLlmCalls !== undefined
@@ -285,7 +286,7 @@ export class SessionController {
 		this.ingestorId = ingestorId
 
 		this.pushLog(
-			`Started Continuous Chaos Stream (${resolved.label}, interval=${this.streamIntervalMs}ms, trap every ${this.streamTrapCadence} ticks${maxLlmCalls ? `, maxLlmCalls=${maxLlmCalls}` : ""})`,
+			`Started Continuous Chaos Stream (${resolved.label}, seed=${this.streamGenerator.seed}, interval=${this.streamIntervalMs}ms, trap every ${this.streamTrapCadence} ticks${maxLlmCalls ? `, maxLlmCalls=${maxLlmCalls}` : ""})`,
 		)
 
 		// Fire initial tick immediately, then schedule interval ticks
@@ -616,6 +617,7 @@ export class SessionController {
 				tickCount: this.streamTickCount,
 				trapsInjected: this.trapsInjected,
 				intervalMs: this.streamIntervalMs,
+				seed: this.streamGenerator?.seed ?? null,
 			},
 			disclaimer: this.pack.disclaimer,
 			logs: [...this.logs],

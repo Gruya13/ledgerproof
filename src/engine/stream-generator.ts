@@ -42,6 +42,25 @@ const ROTATION_ORDER: TrapKind[] = [
 	"orphan_wire",
 ]
 
+function mulberry32(seed: number): () => number {
+	let a = seed >>> 0
+	return () => {
+		a = (a + 0x6d2b79f5) | 0
+		let t = Math.imul(a ^ (a >>> 15), 1 | a)
+		t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+		return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+	}
+}
+
+function shuffleWithRng<T>(items: readonly T[], rand: () => number): T[] {
+	const copy = [...items]
+	for (let i = copy.length - 1; i > 0; i--) {
+		const j = Math.floor(rand() * (i + 1))
+		;[copy[i], copy[j]] = [copy[j], copy[i]]
+	}
+	return copy
+}
+
 export interface StreamTickBatch {
 	tickNumber: number
 	trapKind: TrapKind | null
@@ -63,15 +82,21 @@ function formatSpacedIban(iban: string): string {
  * real financial traps + benign false-positive edge cases.
  */
 export class ContinuousStreamGenerator {
+	readonly seed: number
+	private readonly rand: () => number
+	private trapDeck: TrapKind[] = []
+	private lastAmountCents = 0
 	private invSeq = 2000
 	private txSeq = 5000
 	private reqSeq = 6000
 	private poSeq = 8000
 	private tickSeq = 0
-	private trapCursor = 0
 	private scenarioSeq = 0
 
-	constructor(private readonly vendors: Vendor[]) {}
+	constructor(private readonly vendors: Vendor[], options: { seed?: number } = {}) {
+		this.seed = (options.seed ?? (Date.now() ^ Math.floor(Math.random() * 0xffffffff))) >>> 0
+		this.rand = mulberry32(this.seed)
+	}
 
 	private nextInvId(): string {
 		return `INV-${++this.invSeq}`
@@ -89,29 +114,41 @@ export class ContinuousStreamGenerator {
 		return `PO-${++this.poSeq}`
 	}
 
-	private pickVendor(offset = 0): Vendor {
-		return this.vendors[(this.tickSeq + this.scenarioSeq + offset) % this.vendors.length]
+	private pickVendor(_offset = 0): Vendor {
+		return this.vendors[Math.floor(this.rand() * this.vendors.length)]
+	}
+
+	private drawTrapFromDeck(): TrapKind {
+		if (this.trapDeck.length === 0) {
+			this.trapDeck = shuffleWithRng(ROTATION_ORDER, this.rand)
+		}
+		return this.trapDeck.shift()!
 	}
 
 	/**
-	 * Deterministic varied amount generator so consecutive traps/HITLs never reuse identical dollar figures.
+	 * Seeded PRNG amount generator ensuring truly random dollar figures across runs
+	 * while avoiding consecutive duplicate amounts.
 	 */
 	private variedCents(minDollars: number, maxDollars: number, includeCents = true): number {
-		this.scenarioSeq += 1
+		const centsOptions = [0, 15, 25, 40, 50, 65, 75, 80, 90, 95]
 		const span = Math.max(10, maxDollars - minDollars)
-		// Golden-ratio stepping ensures non-repeating spread across the range
-		const frac = ((this.scenarioSeq * 0.61803398875) % 1)
-		const wholeDollars = minDollars + Math.floor(frac * span)
-		const centsPart = includeCents ? [0, 25, 40, 50, 75, 80, 90][this.scenarioSeq % 7] : 0
-		return wholeDollars * 100 + centsPart
+		let candidate = 0
+		for (let attempt = 0; attempt < 5; attempt++) {
+			this.scenarioSeq += 1
+			const wholeDollars = minDollars + Math.floor(this.rand() * span)
+			const centsPart = includeCents ? centsOptions[Math.floor(this.rand() * centsOptions.length)] : 0
+			candidate = wholeDollars * 100 + centsPart
+			if (candidate !== this.lastAmountCents) break
+		}
+		this.lastAmountCents = candidate
+		return candidate
 	}
 
 	nextTick(opts: { forceTrap?: TrapKind; trapCadence?: number } = {}): StreamTickBatch {
 		this.tickSeq += 1
 		const cadence = Math.max(2, opts.trapCadence ?? 3)
 		const trapKind =
-			opts.forceTrap ??
-			(this.tickSeq % cadence === 0 ? ROTATION_ORDER[this.trapCursor++ % ROTATION_ORDER.length] : null)
+			opts.forceTrap ?? (this.tickSeq % cadence === 0 ? this.drawTrapFromDeck() : null)
 
 		if (!trapKind) {
 			return this.buildCleanTick()
@@ -171,7 +208,7 @@ export class ContinuousStreamGenerator {
 		}
 
 		const requests: PaymentRequest[] = []
-		if (this.tickSeq % 4 === 1) {
+		if (this.rand() < 0.3) {
 			requests.push({
 				sourceId: this.nextReqId(),
 				kind: "sepa_payout",
@@ -202,7 +239,8 @@ export class ContinuousStreamGenerator {
 		const vendor = this.pickVendor(1)
 		const invId = this.nextInvId()
 		const total = this.variedCents(540, 1680)
-		const part1 = Math.round((total * (55 + (this.scenarioSeq % 15))) / 100 / 100) * 100
+		const ratio = 0.4 + this.rand() * 0.3
+		const part1 = Math.round((total * ratio) / 100) * 100
 		const part2 = total - part1
 		const typoRef = invId.replace(/0/, "O")
 
@@ -256,7 +294,8 @@ export class ContinuousStreamGenerator {
 		const invId = this.nextInvId()
 		const invNum = invId.split("-")[1]
 		const total = this.variedCents(480, 1250)
-		const paidNow = Math.round((total * 0.6) / 100) * 100
+		const partialRatio = 0.45 + this.rand() * 0.25
+		const paidNow = Math.round((total * partialRatio) / 100) * 100
 		const lateAmount = total - paidNow
 
 		const inv: Invoice = {
@@ -384,7 +423,7 @@ export class ContinuousStreamGenerator {
 		const txId = this.nextTxId()
 		const reqId = this.nextReqId()
 		const amountCents = this.variedCents(315, 1490)
-		const spoofSuffix = String(100000 + ((this.scenarioSeq * 7919) % 899999))
+		const spoofSuffix = String(100000 + Math.floor(this.rand() * 899999))
 		const spoofedIban = `${vendor.country}99000099${spoofSuffix}`
 
 		const inv: Invoice = {
@@ -586,8 +625,8 @@ export class ContinuousStreamGenerator {
 		const txId = this.nextTxId()
 		const reqId = this.nextReqId()
 		const amountCents = this.variedCents(285, 1740)
-		// Format with spaces every other time to stress-test whitespace IBAN normalization
-		const targetIban = this.scenarioSeq % 2 === 0 ? formatSpacedIban(vendor.masterIban) : vendor.masterIban
+		// Format with spaces randomly to stress-test whitespace IBAN normalization
+		const targetIban = this.rand() < 0.5 ? formatSpacedIban(vendor.masterIban) : vendor.masterIban
 
 		const inv: Invoice = {
 			sourceId: invId,

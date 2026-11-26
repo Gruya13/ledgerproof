@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import type { AddressInfo } from "node:net"
-import { ALL_TRAP_KINDS } from "../src/engine/stream-generator"
+import { ALL_TRAP_KINDS, ContinuousStreamGenerator } from "../src/engine/stream-generator"
+import { loadPack } from "../src/runner-setup"
 import { createLedgerServer } from "../src/server"
 import { SessionController } from "../src/session-controller"
 
@@ -152,5 +153,25 @@ describe("Continuous Chaos Stream & Trap Injection", () => {
 
 		expect(snap.llmBudgetExhausted).toBe(true)
 		expect(snap.metrics.llmCalls).toBeLessThanOrEqual(2)
+	})
+
+	it("generates randomized scenarios across different seeds and deterministic batches for identical seeds", () => {
+		const { vendors } = loadPack()
+		const genA1 = new ContinuousStreamGenerator(vendors, { seed: 101 })
+		const genA2 = new ContinuousStreamGenerator(vendors, { seed: 101 })
+		const genB = new ContinuousStreamGenerator(vendors, { seed: 202 })
+
+		const seqA1 = Array.from({ length: 15 }, () => genA1.nextTick({ trapCadence: 2 }))
+		const seqA2 = Array.from({ length: 15 }, () => genA2.nextTick({ trapCadence: 2 }))
+		const seqB = Array.from({ length: 15 }, () => genB.nextTick({ trapCadence: 2 }))
+
+		expect(seqA1).toEqual(seqA2)
+		const trapsA = seqA1.map((b) => b.trapKind).filter(Boolean)
+		const trapsB = seqB.map((b) => b.trapKind).filter(Boolean)
+		expect(trapsA).not.toEqual(trapsB)
+
+		const amountsA = seqA1.flatMap((b) => b.invoices.map((i) => i.amountCents))
+		const amountsB = seqB.flatMap((b) => b.invoices.map((i) => i.amountCents))
+		expect(amountsA).not.toEqual(amountsB)
 	})
 })

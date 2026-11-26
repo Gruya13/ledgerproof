@@ -146,6 +146,7 @@ export function createLedgerServer(
 						typeof body.autoApprovePolicy === "boolean" ? body.autoApprovePolicy : false,
 					maxLlmCalls: typeof body.maxLlmCalls === "number" ? body.maxLlmCalls : undefined,
 					lateDelayMs: typeof body.lateDelayMs === "number" ? body.lateDelayMs : undefined,
+					seed: typeof body.seed === "number" ? body.seed : undefined,
 				})
 				sendJson(res, result.ok ? 200 : 400, result)
 				return

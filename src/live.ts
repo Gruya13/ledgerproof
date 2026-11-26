@@ -4,6 +4,127 @@ import { resolve } from "node:path"
 import { resolveLiveProviderFromEnv } from "./engine/provider-factory"
 import { evaluateAgainstGroundTruth } from "./proof"
 import { loadGroundTruth, runBlackFridayScenario } from "./runner-setup"
+import { SessionController } from "./session-controller"
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolveFn) => setTimeout(resolveFn, ms))
+}
+
+function getNumericFlag(flag: string, fallback: number): number {
+	const idx = process.argv.indexOf(flag)
+	if (idx < 0) return fallback
+	const parsed = Number(process.argv[idx + 1])
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
+async function runLiveContinuousStream(
+	providerLabel: string,
+	maxTicks: number,
+	maxLlmCalls: number,
+): Promise<void> {
+	console.log("============================================================")
+	console.log(`  LedgerProof — LIVE Randomized Chaos Stream (${maxTicks} ticks)`)
+	console.log(`  Engine: ${providerLabel} | Max LLM Budget: ${maxLlmCalls} calls`)
+	console.log("  100% Synthetic Data | Not Financial Advice")
+	console.log("============================================================\n")
+
+	const controller = new SessionController()
+	let seenLogs = 0
+	const handledApprovals = new Set<string>()
+	const trapCounts: Record<string, number> = {}
+
+	const unsub = controller.subscribe(() => {
+		const snap = controller.getSnapshot()
+		while (seenLogs < snap.logs.length) {
+			const text = snap.logs[seenLogs].text
+			console.log(text)
+			const trapMatch = text.match(/\[Stream #\d+\]\s+(?:TRAP|BENIGN)\s+\[([^\]]+)\]/)
+			if (trapMatch) {
+				trapCounts[trapMatch[1]] = (trapCounts[trapMatch[1]] ?? 0) + 1
+			}
+			seenLogs += 1
+		}
+
+		for (const approval of snap.pendingApprovals) {
+			if (handledApprovals.has(approval.approvalId)) continue
+			handledApprovals.add(approval.approvalId)
+			const hasRiskFlags = approval.riskFlags.length > 0
+			const shouldApprove = !hasRiskFlags
+			setTimeout(() => {
+				controller.resolveApproval(
+					approval.approvalId,
+					shouldApprove,
+					shouldApprove
+						? `Live policy approved benign >$250 transfer (${approval.requestId})`
+						: `Live policy rejected risky payout (${approval.riskFlags.join(", ")})`,
+				)
+			}, 40)
+		}
+	})
+
+	const res = controller.startContinuousStream({
+		mode: "live",
+		intervalMs: 650,
+		trapCadence: 3,
+		autoApprovePolicy: false,
+		maxLlmCalls,
+		lateDelayMs: 2200,
+	})
+
+	if (!res.ok) {
+		unsub()
+		throw new Error(res.error)
+	}
+
+	const deadline = Date.now() + 180_000
+	while (Date.now() < deadline) {
+		const snap = controller.getSnapshot()
+		if (snap.stream.tickCount >= maxTicks || snap.llmBudgetExhausted) {
+			break
+		}
+		await sleep(80)
+	}
+
+	controller.stopContinuousStream()
+	// Allow delayed late settlements (TX-*) and active DeepSeek loops to settle cleanly
+	await sleep(2700)
+	await controller.waitForCurrentIdle(60000)
+	unsub()
+
+	const finalSnap = controller.getSnapshot()
+	const statusCounts: Record<string, number> = {}
+	for (const cell of finalSnap.cells) {
+		statusCounts[cell.record.status] = (statusCounts[cell.record.status] ?? 0) + 1
+	}
+
+	console.log("\n=== LIVE 40-TICK RANDOMIZED STREAM SUMMARY ===")
+	console.log(`Seed                  : ${finalSnap.stream.seed}`)
+	console.log(`Ticks generated       : ${finalSnap.stream.tickCount} (${finalSnap.stream.trapsInjected} scenario injections)`)
+	console.log(`Total ledger invoices : ${finalSnap.totalCellsCount}`)
+	console.log(`Peak concurrent loops : ${finalSnap.metrics.peakConcurrentLoops}`)
+	console.log(`Loops completed       : ${finalSnap.metrics.totalLoopsFinished}/${finalSnap.metrics.totalLoopsStarted}`)
+	console.log(`LLM calls used        : ${finalSnap.metrics.llmCalls}${finalSnap.llmBudgetExhausted ? " (budget cap reached)" : ""}`)
+	console.log(`Deterministic matches : ${finalSnap.metrics.deterministicMatches} (0 LLM tokens)`)
+	console.log(`CAS conflicts stopped : ${finalSnap.metrics.casConflictsPrevented}`)
+	console.log(`L1 uncited blocked    : ${finalSnap.metrics.uncitedNumbersBlocked}`)
+	console.log(`Invented nums leaked  : ${finalSnap.metrics.inventedNumbersLeaked}`)
+	console.log(`Stale invalidations   : ${finalSnap.metrics.staleInvalidations}`)
+	console.log(`Human HITL routed     : ${finalSnap.metrics.humanApprovalsRouted}`)
+	console.log(`Unmatched orphan TXs  : ${finalSnap.unmatchedTxIds.join(", ") || "none"}`)
+	console.log(`Invoice statuses      : ${JSON.stringify(statusCounts)}`)
+	console.log(`Scenario breakdown    : ${JSON.stringify(trapCounts)}`)
+
+	console.log("\n=== BLOCKED / REJECTED CLAIMS ===")
+	for (const rej of finalSnap.rejectedAttempts) {
+		console.log(`- [${rej.id}] (${rej.level} / ${rej.code}) ${rej.agentName}.${rej.actionName}: ${rej.reason}`)
+	}
+
+	const outDir = resolve(process.cwd(), "out")
+	mkdirSync(outDir, { recursive: true })
+	const outPath = resolve(outDir, `live-stream-${maxTicks}-audit.jsonl`)
+	writeFileSync(outPath, controller.getAuditJsonl(), "utf8")
+	console.log(`\nLive stream audit trace exported to out/live-stream-${maxTicks}-audit.jsonl (${finalSnap.auditLog.length} entries).`)
+}
 
 async function main(): Promise<void> {
 	const resolved = resolveLiveProviderFromEnv()
@@ -14,6 +135,13 @@ async function main(): Promise<void> {
 		console.log("  npm run proof")
 		console.log("  npm run demo -- --auto")
 		console.log("  npm run ui")
+		return
+	}
+
+	if (process.argv.includes("--stream")) {
+		const maxTicks = getNumericFlag("--ticks", 40)
+		const maxLlmCalls = getNumericFlag("--max-llm-calls", Math.max(120, maxTicks * 3))
+		await runLiveContinuousStream(resolved.label, maxTicks, maxLlmCalls)
 		return
 	}
 
