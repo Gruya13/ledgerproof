@@ -9,6 +9,7 @@ export interface SepaXmlPreview {
 }
 
 interface Props {
+	sessionId: string
 	selectedSource: SourceInspectPayload | null
 	selectedSepaXml: SepaXmlPreview | null
 	loading: boolean
@@ -18,7 +19,7 @@ interface Props {
 
 const QUICK_IDS = ["INV-1006", "INV-1007", "INV-1009", "INV-1010", "INV-1011", "REQ-3002", "REQ-3003", "TX-2014", "TX-2016", "TX-2017", "VND-04"]
 
-export function SourceDrawer({ selectedSource, selectedSepaXml, loading, error, onInspectSource }: Props) {
+export function SourceDrawer({ sessionId, selectedSource, selectedSepaXml, loading, error, onInspectSource }: Props) {
 	return (
 		<div className="card">
 			<div className="card-header">
@@ -56,7 +57,7 @@ export function SourceDrawer({ selectedSource, selectedSepaXml, loading, error, 
 							</span>
 							<a
 								className="src-pill mono"
-								href={`/api/sepa/${encodeURIComponent(selectedSepaXml.invoiceId)}.xml`}
+								href={`/api/sepa/${encodeURIComponent(selectedSepaXml.invoiceId)}.xml?session=${encodeURIComponent(sessionId)}`}
 								download={`pain.001-${selectedSepaXml.invoiceId}.xml`}
 							>
 								Download XML

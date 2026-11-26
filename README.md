@@ -51,6 +51,16 @@ Open **http://localhost:4317** in your browser and click **Start Interactive Str
 2. **Causal `STALE` Invalidation:** Click **Inject Late Settlement (TX-2017)** to watch `INV-1007` close and its active overdue chase draft flip automatically to **`STALE`**.
 3. **Evidence & Catches:** Open **Blocked / Rejected Claims** (L1 hallucination `$319.99 / TX-9999` + L2 CAS write-skew catch on `INV-1011`), click any `[src:ID]` pill to verify its `SHA-256` source record, or optionally **Preview pain.001** on `SEPA_DRAFT_READY` rows (`INV-1001`, `INV-1012`).
 
+### Docker / Self-Hosted Live Demo
+
+```bash
+docker compose up -d --build
+```
+
+- Runs on `node:22-slim` (works natively on both AMD64 and ARM64/Oracle Ampere) in **zero-key `MockInferenceRunner` mode** (`HOST=0.0.0.0`, `PORT=4317`) so public visitors cannot consume personal API credits.
+- Each browser tab gets an isolated backend `SessionController` (`sessionStorage` ID passed on `/api/*` + 15-minute idle TTL cleanup), so concurrent judges do not overwrite each other's runs.
+- `/api/events` sets `X-Accel-Buffering: no` with a 25s SSE heartbeat for clean streaming behind **Caddy** (`reverse_proxy localhost:4317`) or **Nginx** (`proxy_buffering off; proxy_http_version 1.1;`).
+
 ### Automated Proof, CLI Demo & Continuous Stream
 
 ```bash

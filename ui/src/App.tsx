@@ -29,7 +29,30 @@ function statusBadgeClass(status: string): string {
 	}
 }
 
+function getClientSessionId(): string {
+	try {
+		const existing = window.sessionStorage.getItem("ledgerproof_session_id")
+		if (existing && /^[a-zA-Z0-9_-]{1,64}$/.test(existing)) {
+			return existing
+		}
+		const generated =
+			typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+				? crypto.randomUUID()
+				: `sess-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+		window.sessionStorage.setItem("ledgerproof_session_id", generated)
+		return generated
+	} catch {
+		return `sess-${Date.now().toString(36)}`
+	}
+}
+
+function withSession(path: string, sessionId: string): string {
+	const sep = path.includes("?") ? "&" : "?"
+	return `${path}${sep}session=${encodeURIComponent(sessionId)}`
+}
+
 export function App() {
+	const [sessionId] = useState(getClientSessionId)
 	const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null)
 	const [mode, setMode] = useState<"mock" | "live">("mock")
 	const [tab, setTab] = useState<"ledger" | "rejected" | "claims">("ledger")
@@ -42,7 +65,7 @@ export function App() {
 
 	useEffect(() => {
 		let active = true
-		fetch("/api/state")
+		fetch(withSession("/api/state", sessionId))
 			.then((r) => r.json())
 			.then((data: SessionSnapshot) => {
 				if (active) setSnapshot(data)
@@ -51,7 +74,7 @@ export function App() {
 				if (active) setActionError(String(err))
 			})
 
-		const es = new EventSource("/api/events")
+		const es = new EventSource(withSession("/api/events", sessionId))
 		es.addEventListener("snapshot", (ev) => {
 			if (!active) return
 			try {
@@ -65,14 +88,14 @@ export function App() {
 			active = false
 			es.close()
 		}
-	}, [])
+	}, [sessionId])
 
 	async function inspectSource(id: string) {
 		setSourceLoading(true)
 		setSourceError(null)
 		setSelectedSepaXml(null)
 		try {
-			const res = await fetch(`/api/source/${encodeURIComponent(id)}`)
+			const res = await fetch(withSession(`/api/source/${encodeURIComponent(id)}`, sessionId))
 			const data = (await res.json()) as SourceInspectPayload & { error?: string }
 			if (!res.ok) {
 				setSourceError(data.error ?? `Source ${id} not found`)
@@ -94,7 +117,7 @@ export function App() {
 		setSourceError(null)
 		setSelectedSource(null)
 		try {
-			const res = await fetch(`/api/sepa/${encodeURIComponent(invoiceId)}.xml?inline=1`)
+			const res = await fetch(withSession(`/api/sepa/${encodeURIComponent(invoiceId)}.xml?inline=1`, sessionId))
 			if (!res.ok) {
 				const errJson = (await res.json().catch(() => ({}))) as { error?: string }
 				setSourceError(errJson.error ?? `Failed to load SEPA pain.001 XML for ${invoiceId}`)
@@ -117,7 +140,7 @@ export function App() {
 
 	async function startRun(manualLateSettlement: boolean, autoApprovePolicy: boolean) {
 		setActionError(null)
-		const res = await fetch("/api/run", {
+		const res = await fetch(withSession("/api/run", sessionId), {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({
@@ -134,7 +157,7 @@ export function App() {
 
 	async function handleApproval(approvalId: string, approved: boolean) {
 		setActionError(null)
-		const res = await fetch(`/api/approvals/${encodeURIComponent(approvalId)}`, {
+		const res = await fetch(withSession(`/api/approvals/${encodeURIComponent(approvalId)}`, sessionId), {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({
@@ -152,7 +175,7 @@ export function App() {
 
 	async function handleInjectLate() {
 		setActionError(null)
-		const res = await fetch("/api/inject-late", { method: "POST" })
+		const res = await fetch(withSession("/api/inject-late", sessionId), { method: "POST" })
 		const data = (await res.json()) as { ok: boolean; error?: string }
 		if (!res.ok || !data.ok) {
 			setActionError(data.error ?? "Failed to inject late settlement")
@@ -161,7 +184,7 @@ export function App() {
 
 	async function callStreamApi(endpoint: string, body?: Record<string, unknown>) {
 		setActionError(null)
-		const res = await fetch(endpoint, {
+		const res = await fetch(withSession(endpoint, sessionId), {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(body ?? {}),
@@ -266,7 +289,7 @@ export function App() {
 						{snapshot?.lateSettlementInjected ? "TX-2017 Settled" : "Inject Late Settlement (TX-2017)"}
 					</button>
 
-					<a className="btn" href="/api/audit.jsonl" download="ledgerproof-audit-trace.jsonl">
+					<a className="btn" href={withSession("/api/audit.jsonl", sessionId)} download="ledgerproof-audit-trace.jsonl">
 						Export JSONL
 					</a>
 				</div>
@@ -559,7 +582,7 @@ export function App() {
 															</button>
 															<a
 																className="src-pill mono"
-																href={`/api/sepa/${encodeURIComponent(invoiceId)}.xml`}
+																href={withSession(`/api/sepa/${encodeURIComponent(invoiceId)}.xml`, sessionId)}
 																download={`pain.001-${invoiceId}.xml`}
 															>
 																Download XML
@@ -672,6 +695,7 @@ export function App() {
 
 				<div className="right-col">
 					<SourceDrawer
+						sessionId={sessionId}
 						selectedSource={selectedSource}
 						selectedSepaXml={selectedSepaXml}
 						loading={sourceLoading}

@@ -123,4 +123,32 @@ describe("HTTP & SSE Server API interactive flow", () => {
 		const missingXmlRes = await fetch(`${baseUrl}/api/sepa/INV-1009.xml`)
 		expect(missingXmlRes.status).toBe(404)
 	})
+
+	it("isolates concurrent visitor sessions and sets proxy-safe SSE headers", async () => {
+		const runARes = await fetch(`${baseUrl}/api/run?session=judge-a`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ mode: "mock", manualLateSettlement: false, autoApprovePolicy: true, staggerMs: 5 }),
+		})
+		expect(runARes.status).toBe(200)
+
+		const stateB = (await (await fetch(`${baseUrl}/api/state?session=judge-b`)).json()) as any
+		expect(stateB.status).toBe("IDLE")
+		expect(stateB.metrics.totalLoopsStarted).toBe(0)
+
+		const health = (await (await fetch(`${baseUrl}/api/health`)).json()) as any
+		expect(health.activeSessions).toBeGreaterThanOrEqual(2)
+
+		const abortCtrl = new AbortController()
+		const sseRes = await fetch(`${baseUrl}/api/events?session=judge-a`, { signal: abortCtrl.signal })
+		expect(sseRes.status).toBe(200)
+		expect(sseRes.headers.get("x-accel-buffering")).toBe("no")
+		abortCtrl.abort()
+
+		// Wait cleanly for judge-a run to finish before test suite teardown
+		await pollUntil(
+			async () => (await (await fetch(`${baseUrl}/api/state?session=judge-a`)).json()) as any,
+			(s) => s.status === "COMPLETED",
+		)
+	})
 })

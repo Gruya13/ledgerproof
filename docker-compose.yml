@@ -1,0 +1,14 @@
+services:
+  ledgerproof:
+    build: .
+    container_name: ledgerproof
+    ports:
+      - "${PORT:-4317}:4317"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 4317
+      NODE_ENV: production
+      # Deliberately NO API keys mounted here: public demo runs on deterministic MockInferenceRunner
+      # so visitors and judges can click through every scenario at zero cost without draining personal quota.
+    restart: unless-stopped
+    mem_limit: 512m

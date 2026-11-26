@@ -42,28 +42,129 @@ async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknow
 	return JSON.parse(raw) as Record<string, unknown>
 }
 
+const MAX_SESSIONS = 25
+const SESSION_TTL_MS = 15 * 60 * 1000
+const SESSION_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/
+
+interface SessionEntry {
+	id: string
+	controller: SessionController
+	sseClients: Set<ServerResponse>
+	broadcastScheduled: boolean
+	unsubscribe: () => void
+	lastActiveAt: number
+}
+
+function resolveSessionId(req: IncomingMessage, url: URL): string {
+	const queryVal = url.searchParams.get("session")?.trim()
+	if (queryVal && SESSION_ID_RE.test(queryVal)) return queryVal
+	const headerRaw = req.headers["x-session-id"]
+	const headerVal = Array.isArray(headerRaw) ? headerRaw[0]?.trim() : headerRaw?.trim()
+	if (headerVal && SESSION_ID_RE.test(headerVal)) return headerVal
+	return "default"
+}
+
 export function createLedgerServer(
 	controller = new SessionController(),
 	distUiDir = resolve(process.cwd(), "dist-ui"),
 ): { server: Server; controller: SessionController } {
-	const sseClients = new Set<ServerResponse>()
-	let broadcastScheduled = false
+	const sessions = new Map<string, SessionEntry>()
 
-	const broadcastSnapshot = () => {
-		if (broadcastScheduled || sseClients.size === 0) return
-		broadcastScheduled = true
-		setTimeout(() => {
-			broadcastScheduled = false
-			const data = `event: snapshot\ndata: ${JSON.stringify(controller.getSnapshot())}\n\n`
-			for (const client of sseClients) {
-				if (!client.writableEnded) {
-					client.write(data)
-				}
+	const disposeSession = (id: string) => {
+		const entry = sessions.get(id)
+		if (!entry) return
+		entry.controller.stopContinuousStream()
+		entry.unsubscribe()
+		for (const client of entry.sseClients) {
+			if (!client.writableEnded) {
+				client.end()
 			}
-		}, 25)
+		}
+		entry.sseClients.clear()
+		sessions.delete(id)
 	}
 
-	const unsubscribeController = controller.subscribe(broadcastSnapshot)
+	const getOrCreateSession = (sessionId: string): SessionEntry => {
+		const now = Date.now()
+		const existing = sessions.get(sessionId)
+		if (existing) {
+			existing.lastActiveAt = now
+			return existing
+		}
+
+		// Evict expired idle non-default sessions before allocating a new one
+		for (const [id, entry] of sessions.entries()) {
+			if (id !== "default" && entry.sseClients.size === 0 && now - entry.lastActiveAt > SESSION_TTL_MS) {
+				disposeSession(id)
+			}
+		}
+
+		if (sessions.size >= MAX_SESSIONS) {
+			let oldestId: string | null = null
+			let oldestTs = Infinity
+			for (const [id, entry] of sessions.entries()) {
+				if (id !== "default" && entry.lastActiveAt < oldestTs) {
+					oldestTs = entry.lastActiveAt
+					oldestId = id
+				}
+			}
+			if (oldestId) {
+				disposeSession(oldestId)
+			}
+		}
+
+		const ctrl = sessionId === "default" ? controller : new SessionController()
+		const sseClients = new Set<ServerResponse>()
+		const entry: SessionEntry = {
+			id: sessionId,
+			controller: ctrl,
+			sseClients,
+			broadcastScheduled: false,
+			unsubscribe: () => {},
+			lastActiveAt: now,
+		}
+
+		entry.unsubscribe = ctrl.subscribe(() => {
+			if (entry.broadcastScheduled || entry.sseClients.size === 0) return
+			entry.broadcastScheduled = true
+			setTimeout(() => {
+				entry.broadcastScheduled = false
+				const data = `event: snapshot\ndata: ${JSON.stringify(entry.controller.getSnapshot())}\n\n`
+				for (const client of entry.sseClients) {
+					if (!client.writableEnded) {
+						client.write(data)
+					}
+				}
+			}, 25)
+		})
+
+		sessions.set(sessionId, entry)
+		return entry
+	}
+
+	// Ensure default session is registered immediately
+	getOrCreateSession("default")
+
+	const heartbeatTimer = setInterval(() => {
+		for (const entry of sessions.values()) {
+			for (const client of entry.sseClients) {
+				if (!client.writableEnded) {
+					client.write(": ping\n\n")
+				}
+			}
+		}
+	}, 25_000)
+	heartbeatTimer.unref()
+
+	const cleanupTimer = setInterval(() => {
+		const now = Date.now()
+		for (const [id, entry] of sessions.entries()) {
+			if (id !== "default" && entry.sseClients.size === 0 && now - entry.lastActiveAt > SESSION_TTL_MS) {
+				disposeSession(id)
+			}
+		}
+	}, 60_000)
+	cleanupTimer.unref()
 
 	const server = createServer(async (req, res) => {
 		const url = new URL(req.url ?? "/", "http://127.0.0.1")
@@ -73,12 +174,19 @@ export function createLedgerServer(
 		try {
 			if (method === "GET" && path === "/api/health") {
 				const live = resolveLiveProviderFromEnv()
-				sendJson(res, 200, { ok: true, liveProvider: live?.label ?? null })
+				sendJson(res, 200, {
+					ok: true,
+					liveProvider: live?.label ?? null,
+					activeSessions: sessions.size,
+				})
 				return
 			}
 
+			const session = getOrCreateSession(resolveSessionId(req, url))
+			const activeController = session.controller
+
 			if (method === "GET" && path === "/api/state") {
-				sendJson(res, 200, controller.getSnapshot())
+				sendJson(res, 200, activeController.getSnapshot())
 				return
 			}
 
@@ -87,18 +195,20 @@ export function createLedgerServer(
 					"Content-Type": "text/event-stream; charset=utf-8",
 					"Cache-Control": "no-cache, no-transform",
 					Connection: "keep-alive",
+					"X-Accel-Buffering": "no",
 				})
-				sseClients.add(res)
-				res.write(`event: snapshot\ndata: ${JSON.stringify(controller.getSnapshot())}\n\n`)
+				session.sseClients.add(res)
+				res.write(`event: snapshot\ndata: ${JSON.stringify(activeController.getSnapshot())}\n\n`)
 				req.on("close", () => {
-					sseClients.delete(res)
+					session.sseClients.delete(res)
+					session.lastActiveAt = Date.now()
 				})
 				return
 			}
 
 			if (method === "POST" && path === "/api/run") {
 				const body = await readJsonBody(req)
-				const result = controller.startRun({
+				const result = activeController.startRun({
 					mode: body.mode === "live" ? "live" : "mock",
 					manualLateSettlement:
 						typeof body.manualLateSettlement === "boolean" ? body.manualLateSettlement : true,
@@ -121,7 +231,7 @@ export function createLedgerServer(
 					sendJson(res, 400, { ok: false, error: "approved (boolean) is required" })
 					return
 				}
-				const result = controller.resolveApproval(
+				const result = activeController.resolveApproval(
 					approvalId,
 					body.approved,
 					typeof body.reason === "string" ? body.reason : undefined,
@@ -131,14 +241,14 @@ export function createLedgerServer(
 			}
 
 			if (method === "POST" && path === "/api/inject-late") {
-				const result = controller.injectLateSettlement()
+				const result = activeController.injectLateSettlement()
 				sendJson(res, result.ok ? 200 : 400, result)
 				return
 			}
 
 			if (method === "POST" && path === "/api/stream/start") {
 				const body = await readJsonBody(req)
-				const result = controller.startContinuousStream({
+				const result = activeController.startContinuousStream({
 					mode: body.mode === "live" ? "live" : "mock",
 					intervalMs: typeof body.intervalMs === "number" ? body.intervalMs : undefined,
 					trapCadence: typeof body.trapCadence === "number" ? body.trapCadence : undefined,
@@ -153,19 +263,19 @@ export function createLedgerServer(
 			}
 
 			if (method === "POST" && path === "/api/stream/pause") {
-				const result = controller.pauseContinuousStream()
+				const result = activeController.pauseContinuousStream()
 				sendJson(res, result.ok ? 200 : 400, result)
 				return
 			}
 
 			if (method === "POST" && path === "/api/stream/resume") {
-				const result = controller.resumeContinuousStream()
+				const result = activeController.resumeContinuousStream()
 				sendJson(res, result.ok ? 200 : 400, result)
 				return
 			}
 
 			if (method === "POST" && path === "/api/stream/stop") {
-				const result = controller.stopContinuousStream()
+				const result = activeController.stopContinuousStream()
 				sendJson(res, 200, result)
 				return
 			}
@@ -173,14 +283,14 @@ export function createLedgerServer(
 			if (method === "POST" && path === "/api/stream/inject-trap") {
 				const body = await readJsonBody(req)
 				const kind = typeof body.kind === "string" ? (body.kind as TrapKind) : undefined
-				const result = controller.injectStreamTrap(kind)
+				const result = activeController.injectStreamTrap(kind)
 				sendJson(res, result.ok ? 200 : 400, result)
 				return
 			}
 
 			if (method === "GET" && path.startsWith("/api/source/")) {
 				const sourceId = decodeURIComponent(path.slice("/api/source/".length))
-				const entity = controller.getSource(sourceId)
+				const entity = activeController.getSource(sourceId)
 				if (!entity) {
 					sendJson(res, 404, { ok: false, error: `Source "${sourceId}" not found` })
 					return
@@ -190,7 +300,7 @@ export function createLedgerServer(
 			}
 
 			if (method === "GET" && path === "/api/audit.jsonl") {
-				const jsonl = controller.getAuditJsonl()
+				const jsonl = activeController.getAuditJsonl()
 				res.writeHead(200, {
 					"Content-Type": "application/x-ndjson; charset=utf-8",
 					"Content-Disposition": 'attachment; filename="ledgerproof-audit-trace.jsonl"',
@@ -201,7 +311,7 @@ export function createLedgerServer(
 
 			if (method === "GET" && path.startsWith("/api/sepa/") && path.endsWith(".xml")) {
 				const invoiceId = decodeURIComponent(path.slice("/api/sepa/".length, -".xml".length))
-				const artifact = controller.getSepaDraftXml(invoiceId)
+				const artifact = activeController.getSepaDraftXml(invoiceId)
 				if (!artifact) {
 					sendJson(res, 404, { ok: false, error: `No SEPA pain.001 XML draft found for "${invoiceId}"` })
 					return
@@ -254,14 +364,11 @@ export function createLedgerServer(
 	})
 
 	server.on("close", () => {
-		controller.stopContinuousStream()
-		unsubscribeController()
-		for (const client of sseClients) {
-			if (!client.writableEnded) {
-				client.end()
-			}
+		clearInterval(heartbeatTimer)
+		clearInterval(cleanupTimer)
+		for (const id of [...sessions.keys()]) {
+			disposeSession(id)
 		}
-		sseClients.clear()
 	})
 
 	return { server, controller }
