@@ -202,10 +202,11 @@ export function verifyMessageCitations(
 		}
 	}
 
-	// Check each dollar amount appears on at least one cited entity (or sum of cited transactions)
+	// Check each dollar amount appears on at least one cited entity (or sum/delta of unique cited transactions)
+	const uniqueAnchors = [...new Set(anchors)]
 	const citedAmounts = new Set<number>(allowedPolicyAmounts)
 	let sumOfCitedTx = 0
-	for (const id of anchors) {
+	for (const id of uniqueAnchors) {
 		const entity = sourceStore.get(id)
 		if (!entity || entity.kind === "vendor") continue
 		citedAmounts.add(entity.data.amountCents)
@@ -213,11 +214,11 @@ export function verifyMessageCitations(
 			sumOfCitedTx += entity.data.amountCents
 		}
 		if (entity.kind === "invoice") {
-			// Also allow remaining balance if a partial tx is also cited in the same message
-			for (const otherId of anchors) {
+			// Allow both remaining balance (underpayment) and excess amount (overpayment) when paired with a cited tx
+			for (const otherId of uniqueAnchors) {
 				const other = sourceStore.get(otherId)
-				if (other?.kind === "transaction" && entity.data.amountCents > other.data.amountCents) {
-					citedAmounts.add(entity.data.amountCents - other.data.amountCents)
+				if (other?.kind === "transaction" && entity.data.amountCents !== other.data.amountCents) {
+					citedAmounts.add(Math.abs(entity.data.amountCents - other.data.amountCents))
 				}
 			}
 		}

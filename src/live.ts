@@ -48,27 +48,32 @@ async function runLiveContinuousStream(
 		for (const approval of snap.pendingApprovals) {
 			if (handledApprovals.has(approval.approvalId)) continue
 			handledApprovals.add(approval.approvalId)
-			const hasRiskFlags = approval.riskFlags.length > 0
-			const shouldApprove = !hasRiskFlags
+			// Wait briefly so concurrent RiskSentinel loops over live network can land risk holds before policy decides
 			setTimeout(() => {
+				const latestSnap = controller.getSnapshot()
+				const latestCell = latestSnap.cells.find((c) => c.invoiceId === approval.invoiceId)
+				const activeRiskFlags = latestCell?.record.riskFlags ?? approval.riskFlags
+				const hasRiskFlags = activeRiskFlags.length > 0 || approval.riskFlags.length > 0
+				const shouldApprove = !hasRiskFlags
 				controller.resolveApproval(
 					approval.approvalId,
 					shouldApprove,
 					shouldApprove
 						? `Live policy approved benign >$250 transfer (${approval.requestId})`
-						: `Live policy rejected risky payout (${approval.riskFlags.join(", ")})`,
+						: `Live policy rejected risky payout (${[...new Set([...approval.riskFlags, ...activeRiskFlags])].join(", ")})`,
 				)
-			}, 40)
+			}, 1500)
 		}
 	})
 
+	const lateDelayMs = 7000
 	const res = controller.startContinuousStream({
 		mode: "live",
 		intervalMs: 650,
 		trapCadence: 3,
 		autoApprovePolicy: false,
 		maxLlmCalls,
-		lateDelayMs: 2200,
+		lateDelayMs,
 	})
 
 	if (!res.ok) {
@@ -87,7 +92,7 @@ async function runLiveContinuousStream(
 
 	controller.stopContinuousStream()
 	// Allow delayed late settlements (TX-*) and active DeepSeek loops to settle cleanly
-	await sleep(2700)
+	await sleep(lateDelayMs + 500)
 	await controller.waitForCurrentIdle(60000)
 	unsub()
 

@@ -55,5 +55,12 @@ describe("ProofVerifier L1 deterministic source & math gates", () => {
 			new Set([25000]),
 		)
 		expect(withPolicyLimit.ok).toBe(true)
+
+		// Overpayment delta: INV-1007 ($800.00) vs TX-2008 ($500.00) -> $300.00 difference allowed when both cited
+		const withDelta = verifyMessageCitations(
+			"Delta of $300.00 between [src:INV-1007] ($800.00) and [src:TX-2008] ($500.00).",
+			store,
+		)
+		expect(withDelta.ok).toBe(true)
 	})
 })

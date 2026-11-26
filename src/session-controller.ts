@@ -262,7 +262,7 @@ export class SessionController {
 		this.trapsInjected = 0
 		this.streamIntervalMs = Math.max(80, options.intervalMs ?? 1500)
 		this.streamTrapCadence = Math.max(2, options.trapCadence ?? 3)
-		this.streamLateDelayMs = Math.max(80, options.lateDelayMs ?? 3500)
+		this.streamLateDelayMs = Math.max(80, options.lateDelayMs ?? (resolved.mode === "live" ? 7000 : 3500))
 		this.manualLateSettlement = false
 		this.lateSettlementInjected = false
 		this.mode = resolved.mode
