@@ -21,6 +21,8 @@ function parseArgs(raw: string): unknown {
 
 export class ProofGateInterceptionHandler implements InterceptionHandler {
 	private proseRetried = false
+	private toolRejections = 0
+	private readonly maxToolRejections = 3
 
 	constructor(
 		private readonly agentId: string,
@@ -39,7 +41,11 @@ export class ProofGateInterceptionHandler implements InterceptionHandler {
 
 		if (transition.nextStateId === "model_message") {
 			const { answer } = transition.input as { answer: ModelMessageItem }
-			const check = verifyMessageCitations(answer.content.text, state.sourceStore)
+			const check = verifyMessageCitations(
+				answer.content.text,
+				state.sourceStore,
+				new Set([state.spendingLimitCents]),
+			)
 			if (check.ok) {
 				return transition
 			}
@@ -266,7 +272,17 @@ export class ProofGateInterceptionHandler implements InterceptionHandler {
 		inferenceInput: InferenceInput,
 		outputJson: string,
 	): ExecutableTransition {
-		const output = FunctionCallOutputItem.create(call.callId, outputJson)
+		this.toolRejections += 1
+		const payload =
+			this.toolRejections > this.maxToolRejections
+				? JSON.stringify({
+						ok: false,
+						blockedBy: "ProofGate-Cap",
+						reason:
+							"Max tool retries (3) reached for this loop. Do NOT call any more tools; produce a concise final summary citing only verified [src:ID] sources.",
+					})
+				: outputJson
+		const output = FunctionCallOutputItem.create(call.callId, payload)
 		inferenceInput.context.addContextItems([call, output])
 		return {
 			nextStateId: inferenceInput.streaming ? "inference_streaming" : "inference",

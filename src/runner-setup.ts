@@ -99,7 +99,8 @@ export async function runBlackFridayScenario(options: ScenarioOptions = {}): Pro
 		}
 
 		// Wait until the partial chase draft on INV-1007 has been created before injecting late settlement TX-2017
-		const deadline = Date.now() + 3000
+		const chaseWaitMs = options.runner === undefined && !options.useNativeRunner ? 3000 : 15000
+		const deadline = Date.now() + chaseWaitMs
 		while (Date.now() < deadline) {
 			const inv1007 = state.getCell("INV-1007")?.read().value
 			if (inv1007 && inv1007.drafts.some((d) => d.status === "ACTIVE")) {
@@ -116,6 +117,6 @@ export async function runBlackFridayScenario(options: ScenarioOptions = {}): Pro
 		state.endExternalWork()
 	}
 
-	await state.waitForIdle(20000)
+	await state.waitForIdle(60000)
 	return state
 }

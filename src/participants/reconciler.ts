@@ -13,6 +13,7 @@ import {
 } from "@mozaik-ai/core"
 import type { LedgerRuntimeApi } from "../runtime"
 import { ProofGateInterceptionHandler } from "../interception/proof-gate"
+import { CITATION_ARRAY_SCHEMA } from "./schemas"
 import type { BankTransaction, Citation, ClaimRecord } from "../types"
 
 class AmbiguousMatchSpec extends SituationSpecification {
@@ -39,18 +40,7 @@ export function createReconcilerAgent(rt: LedgerRuntimeApi, modelName: string): 
 				amountCents: { type: "number" },
 				matchKind: { type: "string", enum: ["SPLIT_MATCH", "PARTIAL_MATCH", "ORPHAN_TX"] },
 				explanation: { type: "string" },
-				citations: {
-					type: "array",
-					items: {
-						type: "object",
-						properties: {
-							sourceId: { type: "string" },
-							field: { type: "string" },
-							expectedValue: {},
-						},
-						required: ["sourceId", "field", "expectedValue"],
-					},
-				},
+				citations: CITATION_ARRAY_SCHEMA,
 			},
 			required: ["amountCents", "matchKind", "explanation", "citations"],
 		},
@@ -95,6 +85,16 @@ export function createReconcilerAgent(rt: LedgerRuntimeApi, modelName: string): 
 
 			const txIds = args.txIds ?? (args.txId ? [args.txId] : [])
 			const snap = cell.read()
+			if (txIds.every((id) => snap.value.matchedTxIds.includes(id))) {
+				return {
+					ok: true,
+					idempotent: true,
+					invoiceId: args.invoiceId,
+					status: snap.value.status,
+					paidAmountCents: snap.value.paidAmountCents,
+				}
+			}
+
 			const totalPaid = snap.value.paidAmountCents + args.amountCents
 			const status = totalPaid >= inv.amountCents ? "MATCHED" : "PARTIAL"
 
@@ -203,8 +203,16 @@ export function createReconcilerAgent(rt: LedgerRuntimeApi, modelName: string): 
 	const agent = createAgent({
 		name: "Reconciler",
 		capabilities: ["semantic-reconciliation", "split-matching"],
-		instruction:
-			"You are Reconciler, a concurrent financial reconciliation agent. Never invent numbers or IDs. Always provide exact source citations and integer amountCents, and include [src:ID] tags in your final message.",
+		instruction: [
+			"You are Reconciler, a concurrent financial reconciliation agent.",
+			"Rules:",
+			"1. All monetary amounts are integer amountCents (e.g. 120000 for $1,200.00). Never invent numbers or IDs.",
+			"2. Only match transactions to an invoice if the exact sum of transaction amountCents equals the invoice amount (SPLIT_MATCH, even with memo typos like INV10O6 -> INV-1006) OR clearly references an invoice as a partial tranche (PARTIAL_MATCH).",
+			"3. If a single split transaction arrives before its counterpart, wait without calling record_reconciliation.",
+			"4. If an unreferenced wire has no matching invoice or vendor in arrivedInvoices, classify it with matchKind='ORPHAN_TX' and txId.",
+			"5. Every tool call MUST include exact citations [{ sourceId, field: 'amountCents', expectedValue }] for the invoice (if matched) and every transaction.",
+			"6. In your final text reply, include [src:ID] tags for every invoice/transaction and dollar figure mentioned.",
+		].join("\n"),
 		tools: [recordReconciliationTool],
 		handlers: [handler],
 	})

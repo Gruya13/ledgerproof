@@ -20,7 +20,8 @@ export interface DeepSeekConfig {
 
 /**
  * OpenAI-compatible InferenceRunner targeting DeepSeek Chat Completions API.
- * Ready for live execution when DEEPSEEK_API_KEY is supplied.
+ * Enforces single tool-call per turn (parallel_tool_calls: false) to match
+ * @mozaik-ai/core's single-transition AgentLoop state machine.
  */
 export class DeepSeekInferenceRunner implements InferenceRunner {
 	private readonly client: OpenAI
@@ -81,27 +82,32 @@ export class DeepSeekInferenceRunner implements InferenceRunner {
 				}))
 			: undefined
 
-		const response = await this.client.chat.completions.create({
+		const requestParams: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming = {
 			model: input.model || this.defaultModel,
 			messages,
-			tools,
-		})
+			temperature: 0,
+		}
+		if (tools && tools.length > 0) {
+			requestParams.tools = tools
+			requestParams.parallel_tool_calls = false
+		}
+
+		const response = await this.client.chat.completions.create(requestParams)
 
 		const choice = response.choices[0]
 		const msg = choice?.message
 		const items: InferenceOutput["items"] = []
 
 		if (msg?.tool_calls && msg.tool_calls.length > 0) {
-			for (const tc of msg.tool_calls) {
-				if (tc.type === "function") {
-					items.push(
-						FunctionCallItem.rehydrate({
-							callId: tc.id,
-							name: tc.function.name,
-							args: tc.function.arguments,
-						}),
-					)
-				}
+			const tc = msg.tool_calls[0]
+			if (tc.type === "function") {
+				items.push(
+					FunctionCallItem.rehydrate({
+						callId: tc.id,
+						name: tc.function.name,
+						args: tc.function.arguments,
+					}),
+				)
 			}
 		} else {
 			items.push(

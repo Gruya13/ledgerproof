@@ -13,6 +13,7 @@ import {
 } from "@mozaik-ai/core"
 import type { LedgerRuntimeApi } from "../runtime"
 import { ProofGateInterceptionHandler } from "../interception/proof-gate"
+import { CITATION_ARRAY_SCHEMA } from "./schemas"
 import type { BankTransaction, Citation, ClaimRecord, Invoice, PaymentRequest, RiskFlag } from "../types"
 
 class RiskTriggerSpec extends SituationSpecification {
@@ -40,7 +41,7 @@ export function createRiskSentinelAgent(rt: LedgerRuntimeApi, modelName: string)
 				},
 				severity: { type: "string", enum: ["HIGH", "CRITICAL"] },
 				reason: { type: "string" },
-				citations: { type: "array", items: { type: "object" } },
+				citations: CITATION_ARRAY_SCHEMA,
 			},
 			required: ["invoiceId", "riskFlag", "severity", "reason", "citations"],
 		},
@@ -187,8 +188,14 @@ export function createRiskSentinelAgent(rt: LedgerRuntimeApi, modelName: string)
 	const agent = createAgent({
 		name: "RiskSentinel",
 		capabilities: ["duplicate-detection", "bec-iban-guard", "fraud-velocity"],
-		instruction:
-			"You are RiskSentinel, a concurrent financial risk agent. When duplicate invoices, BEC IBAN mismatches, or fraud velocity alerts occur, call flag_risk immediately with exact citations and include [src:ID] tags in your summary.",
+		instruction: [
+			"You are RiskSentinel, a concurrent financial risk agent.",
+			"Rules:",
+			"1. Duplicate invoice (same vendor, PO, amountCents): call flag_risk with riskFlag='DUPLICATE_INVOICE', severity='HIGH', citing poNumber and amountCents on both invoices.",
+			"2. BEC IBAN mismatch (request.targetIban != vendor.masterIban): call flag_risk with riskFlag='BEC_IBAN_CHANGE', severity='CRITICAL', citing request.targetIban and vendor.masterIban.",
+			"3. Fraud alert transaction (kind='fraud_alert'): call flag_risk with riskFlag='FRAUD_VELOCITY', severity='CRITICAL', citing transaction.amountCents and invoice.amountCents.",
+			"4. In your final text reply, include [src:ID] tags for every invoice/transaction/request/vendor and dollar amount mentioned.",
+		].join("\n"),
 		tools: [flagRiskTool],
 		handlers: [handler],
 	})

@@ -13,6 +13,7 @@ import {
 } from "@mozaik-ai/core"
 import type { LedgerRuntimeApi } from "../runtime"
 import { ProofGateInterceptionHandler } from "../interception/proof-gate"
+import { CITATION_ARRAY_SCHEMA } from "./schemas"
 import type { Citation, ClaimRecord, PaymentRequest } from "../types"
 
 class PayoutRefundSpec extends SituationSpecification {
@@ -43,7 +44,7 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 				amountCents: { type: "number" },
 				targetIban: { type: "string" },
 				expectedVersion: { type: "number" },
-				citations: { type: "array", items: { type: "object" } },
+				citations: CITATION_ARRAY_SCHEMA,
 			},
 			required: ["requestId", "invoiceId", "vendorId", "amountCents", "targetIban", "citations"],
 		},
@@ -112,7 +113,7 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 				amountCents: { type: "number" },
 				expectedVersion: { type: "number" },
 				reason: { type: "string" },
-				citations: { type: "array", items: { type: "object" } },
+				citations: CITATION_ARRAY_SCHEMA,
 			},
 			required: ["requestId", "invoiceId", "amountCents", "citations"],
 		},
@@ -166,7 +167,7 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 				amountCents: { type: "number" },
 				basedOnVersion: { type: "number" },
 				reason: { type: "string" },
-				citations: { type: "array", items: { type: "object" } },
+				citations: CITATION_ARRAY_SCHEMA,
 			},
 			required: ["invoiceId", "amountCents", "basedOnVersion", "citations"],
 		},
@@ -291,8 +292,15 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 	const agent = createAgent({
 		name: "PayoutAndRefund",
 		capabilities: ["sepa-payouts", "refunds", "chase-drafts"],
-		instruction:
-			"You are PayoutAndRefund, a controlled payment agent. Respect spending limits ($250 auto-approve), pass expectedVersion for CAS safety, never invent amounts, and include [src:ID] tags in your answer.",
+		instruction: [
+			"You are PayoutAndRefund, a controlled payment agent.",
+			"Rules:",
+			"1. On request.arrived with kind='sepa_payout', call propose_sepa_payout with exact amountCents, targetIban, expectedVersion, and citations for the request and invoice.",
+			"2. On request.arrived with kind='refund', call propose_refund with exact amountCents, expectedVersion, and citations for the request and invoice.",
+			"3. On invoice.partial, call draft_overdue_chase using remainingCents as amountCents, expectedVersion as basedOnVersion, and cite the invoice amountCents.",
+			"4. On claim.staled, do NOT call any tool — simply confirm chase draft cancellation citing [src:INV-1007].",
+			"5. Never invent amounts. In your final text reply, include [src:ID] tags for every invoice/request/amount mentioned.",
+		].join("\n"),
 		tools: [proposeSepaPayoutTool, proposeRefundTool, draftOverdueChaseTool],
 		handlers: [handler],
 	})

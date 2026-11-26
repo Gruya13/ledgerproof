@@ -175,7 +175,11 @@ const SOURCE_ANCHOR_RE = /\[src:([A-Z]+-\d+)\]/g
  * accompanied by at least one valid [src:ID] anchor that exists in SourceStore,
  * and every cited [src:ID] must exist in SourceStore.
  */
-export function verifyMessageCitations(text: string, sourceStore: SourceStore): ProofCheckResult {
+export function verifyMessageCitations(
+	text: string,
+	sourceStore: SourceStore,
+	allowedPolicyAmounts: ReadonlySet<number> = new Set(),
+): ProofCheckResult {
 	const anchors: string[] = []
 	for (const match of text.matchAll(SOURCE_ANCHOR_RE)) {
 		const id = match[1]
@@ -199,7 +203,7 @@ export function verifyMessageCitations(text: string, sourceStore: SourceStore): 
 	}
 
 	// Check each dollar amount appears on at least one cited entity (or sum of cited transactions)
-	const citedAmounts = new Set<number>()
+	const citedAmounts = new Set<number>(allowedPolicyAmounts)
 	let sumOfCitedTx = 0
 	for (const id of anchors) {
 		const entity = sourceStore.get(id)

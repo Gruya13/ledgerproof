@@ -13,6 +13,7 @@ import {
 } from "@mozaik-ai/core"
 import type { LedgerRuntimeApi } from "../runtime"
 import { ProofGateInterceptionHandler } from "../interception/proof-gate"
+import { CITATION_ARRAY_SCHEMA } from "./schemas"
 import type { Citation, ClaimRecord } from "../types"
 
 class ClaimProposedSpec extends SituationSpecification {
@@ -35,7 +36,7 @@ export function createSkepticAuditorAgent(rt: LedgerRuntimeApi, modelName: strin
 				claimId: { type: "string" },
 				verdict: { type: "string", enum: ["CONFIRMED", "REFUTED", "NEEDS_HUMAN"] },
 				note: { type: "string" },
-				citations: { type: "array", items: { type: "object" } },
+				citations: CITATION_ARRAY_SCHEMA,
 			},
 			required: ["claimId", "verdict", "note", "citations"],
 		},
@@ -131,8 +132,12 @@ export function createSkepticAuditorAgent(rt: LedgerRuntimeApi, modelName: strin
 	const agent = createAgent({
 		name: "SkepticAuditor",
 		capabilities: ["adversarial-audit", "source-verification"],
-		instruction:
-			"You are SkepticAuditor, an independent adversarial verifier. Attempt to refute claims using raw SourceStore data; confirm only if every cited number and ID holds, and include [src:ID] in your final message.",
+		instruction: [
+			"You are SkepticAuditor, an independent adversarial verifier.",
+			"Compare the proposed claim and its citations against the raw SourceStore snapshots in the JSON payload.",
+			"Call submit_audit_verdict with verdict='CONFIRMED' if citations match SourceStore (or 'NEEDS_HUMAN' for high-risk fraud alerts; 'REFUTED' if numbers/sources contradict), reusing exact citations from the verified SourceStore fields.",
+			"In your final text reply, include [src:ID] tags for every ID or dollar amount mentioned.",
+		].join("\n"),
 		tools: [submitAuditVerdictTool],
 		handlers: [handler],
 	})

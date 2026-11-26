@@ -42,11 +42,18 @@ describe("ProofVerifier L1 deterministic source & math gates", () => {
 		expect(res.code).toBe("INVALID_CITATION")
 	})
 
-	it("blocks uncited or invented monetary figures in model prose", () => {
+	it("blocks uncited or invented monetary figures in model prose while allowing policy limit when cited", () => {
 		const uncited = verifyMessageCitations("Refund approved for $319.99 immediately.", store)
 		expect(uncited.ok).toBe(false)
 
 		const citedValid = verifyMessageCitations("Verified [src:INV-1011] for $310.00.", store)
 		expect(citedValid.ok).toBe(true)
+
+		const withPolicyLimit = verifyMessageCitations(
+			"Payout [src:REQ-3004] ($195.00) is below the $250.00 policy limit.",
+			store,
+			new Set([25000]),
+		)
+		expect(withPolicyLimit.ok).toBe(true)
 	})
 })
