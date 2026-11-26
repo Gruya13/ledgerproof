@@ -27,6 +27,7 @@ export type ApprovalHandler = (approval: PendingApproval) => Promise<ApprovalDec
 export interface ApprovedExecutionGrant {
 	requestId: string
 	invoiceId: string
+	vendorId: string
 	actionName: "propose_sepa_payout" | "propose_refund"
 	approvedBy: "AUTO_POLICY" | "HUMAN"
 	approvedVersion: number

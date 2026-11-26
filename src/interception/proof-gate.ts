@@ -379,6 +379,39 @@ export class ProofGateInterceptionHandler implements InterceptionHandler {
 					)
 				}
 
+				if (decision.decidedBy === "POLICY_AUTO" && ibanMismatch) {
+					const rejection = state.recordRejection({
+						level: "L3_HUMAN_REJECTED",
+						code: "HUMAN_REQUIRED_FOR_IBAN_CHANGE",
+						agentName: this.agentName,
+						actionName: call.name,
+						reason: `POLICY_AUTO cannot approve BEC IBAN mismatch on ${req.sourceId}; interactive human decision required.`,
+						rawArgs: parsed,
+					})
+					const curSnap = cell.read()
+					cell.casWrite(curSnap.version, (cur) => ({
+						...cur,
+						status: "HOLD_RISK",
+						riskFlags: flags,
+						notes: [...cur.notes, `Blocked POLICY_AUTO approval on IBAN mismatch (${req.sourceId})`],
+					}))
+					this.rt.sendEvent(SemanticEvent.create("proof.blocked", this.agentId, rejection), this.agentId)
+
+					return this.rejectToolCall(
+						call,
+						inferenceInput,
+						JSON.stringify({
+							ok: false,
+							blockedBy: "ProofGate-L3-HITL",
+							code: "HUMAN_REQUIRED_FOR_IBAN_CHANGE",
+							reason: rejection.reason,
+						}),
+					)
+				}
+
+				const approvedBy: "HUMAN" | "AUTO_POLICY" =
+					decision.decidedBy === "HUMAN_INTERACTIVE" ? "HUMAN" : "AUTO_POLICY"
+
 				const postSnap = cell.read()
 				const postReq = state.sourceStore.getRequest(req.sourceId)
 				const ibanStillMatches =
@@ -455,8 +488,9 @@ export class ProofGateInterceptionHandler implements InterceptionHandler {
 				state.grantExecution({
 					requestId: req.sourceId,
 					invoiceId: args.invoiceId!,
+					vendorId: req.vendorId,
 					actionName: call.name,
-					approvedBy: "HUMAN",
+					approvedBy,
 					approvedVersion: postSnap.version,
 					amountCents: req.amountCents,
 					targetIban: req.targetIban ? normalizeIban(req.targetIban) : undefined,
@@ -466,6 +500,7 @@ export class ProofGateInterceptionHandler implements InterceptionHandler {
 				state.grantExecution({
 					requestId: req.sourceId,
 					invoiceId: args.invoiceId!,
+					vendorId: req.vendorId,
 					actionName: call.name,
 					approvedBy: "AUTO_POLICY",
 					approvedVersion: snap.version,

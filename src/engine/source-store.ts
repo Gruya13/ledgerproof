@@ -33,8 +33,21 @@ export class SourceStore {
 		return store
 	}
 
+	private putImmutable(sourceId: string, entry: SourceEntity): void {
+		const existing = this.entities.get(sourceId)
+		if (existing) {
+			if (existing.sha256 === entry.sha256) {
+				return
+			}
+			throw new Error(
+				`Immutable SourceStore violation: cannot overwrite ${sourceId} with modified content`,
+			)
+		}
+		this.entities.set(sourceId, entry)
+	}
+
 	addVendor(vendor: Vendor): void {
-		this.entities.set(vendor.sourceId, {
+		this.putImmutable(vendor.sourceId, {
 			kind: "vendor",
 			data: structuredClone(vendor),
 			sha256: canonicalSha256(vendor),
@@ -42,7 +55,7 @@ export class SourceStore {
 	}
 
 	addInvoice(invoice: Invoice): void {
-		this.entities.set(invoice.sourceId, {
+		this.putImmutable(invoice.sourceId, {
 			kind: "invoice",
 			data: structuredClone(invoice),
 			sha256: canonicalSha256(invoice),
@@ -50,7 +63,7 @@ export class SourceStore {
 	}
 
 	addTransaction(tx: BankTransaction): void {
-		this.entities.set(tx.sourceId, {
+		this.putImmutable(tx.sourceId, {
 			kind: "transaction",
 			data: structuredClone(tx),
 			sha256: canonicalSha256(tx),
@@ -58,7 +71,7 @@ export class SourceStore {
 	}
 
 	addRequest(req: PaymentRequest): void {
-		this.entities.set(req.sourceId, {
+		this.putImmutable(req.sourceId, {
 			kind: "request",
 			data: structuredClone(req),
 			sha256: canonicalSha256(req),

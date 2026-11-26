@@ -74,6 +74,15 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 			if (!inv || !req || !vendor || !req.targetIban) {
 				return { ok: false, reason: "Missing invoice, request, vendor, or targetIban in SourceStore for SEPA XML generation" }
 			}
+			if (
+				req.amountCents !== grant.amountCents ||
+				req.invoiceId !== grant.invoiceId ||
+				req.vendorId !== grant.vendorId ||
+				!grant.targetIban ||
+				normalizeIban(req.targetIban) !== grant.targetIban
+			) {
+				return { ok: false, reason: "Execution grant no longer matches source request" }
+			}
 
 			const approvedBy = grant.approvedBy
 			const casVersion = grant.approvedVersion
@@ -178,6 +187,14 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 			const cell = state.getCell(grant.invoiceId)
 			const req = state.sourceStore.getRequest(grant.requestId)
 			if (!cell || !req) return { ok: false, reason: "Unknown invoice or request" }
+
+			if (
+				req.amountCents !== grant.amountCents ||
+				req.invoiceId !== grant.invoiceId ||
+				req.vendorId !== grant.vendorId
+			) {
+				return { ok: false, reason: "Execution grant no longer matches source request" }
+			}
 
 			const snap = cell.read()
 			if (snap.value.status === "REFUNDED" || req.amountCents > snap.value.paidAmountCents) {

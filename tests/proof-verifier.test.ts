@@ -199,4 +199,34 @@ describe("ProofVerifier L1 deterministic source & math gates", () => {
 		expect(eurOnly.ok).toBe(false)
 		expect(eurOnly.code).toBe("SEPA_REQUIRES_EUR")
 	})
+
+	it("requires citations for both invoiceId and requestId on propose_sepa_payout and propose_refund", () => {
+		const sepaIncomplete = verifyToolProposal(
+			"propose_sepa_payout",
+			{
+				requestId: "REQ-3004",
+				invoiceId: "INV-1012",
+				vendorId: "VND-06",
+				amountCents: 19500,
+				targetIban: "CZ6508000000192000145399",
+				citations: [{ sourceId: "INV-1001", field: "amountCents", expectedValue: 14500 }],
+			},
+			store,
+		)
+		expect(sepaIncomplete.ok).toBe(false)
+		expect(sepaIncomplete.code).toBe("INCOMPLETE_CITATIONS")
+
+		const refundIncomplete = verifyToolProposal(
+			"propose_refund",
+			{
+				requestId: "REQ-3003",
+				invoiceId: "INV-1011",
+				amountCents: 31000,
+				citations: [{ sourceId: "INV-1001", field: "amountCents", expectedValue: 14500 }],
+			},
+			store,
+		)
+		expect(refundIncomplete.ok).toBe(false)
+		expect(refundIncomplete.code).toBe("INCOMPLETE_CITATIONS")
+	})
 })

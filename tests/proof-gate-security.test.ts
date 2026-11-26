@@ -273,4 +273,119 @@ describe("ProofGate security invariants (HITL provenance, post-HITL staleness, r
 		expect(secondRes.nextStateId).toBe("inference")
 		expect(state.rejectedAttempts.some((r) => r.code === "ALREADY_REFUNDED")).toBe(true)
 	})
+
+	it("rejects POLICY_AUTO on BEC_IBAN_CHANGE and preserves AUTO_POLICY provenance on policy-approved payouts", async () => {
+		const basePack = loadPack()
+		const pack: BlackFridayPack = {
+			...basePack,
+			invoices: [
+				{
+					sourceId: "INV-9004",
+					vendorId: "VND-01",
+					poNumber: "PO-9004",
+					amountCents: 15000,
+					currency: "EUR",
+					issuedAt: "2026-11-26",
+					dueDate: "2026-12-03",
+					description: "IBAN mismatch POLICY_AUTO rejection test",
+				},
+				{
+					sourceId: "INV-9005",
+					vendorId: "VND-01",
+					poNumber: "PO-9005",
+					amountCents: 40000,
+					currency: "EUR",
+					issuedAt: "2026-11-26",
+					dueDate: "2026-12-03",
+					description: "Clean over-limit POLICY_AUTO provenance test",
+				},
+			],
+			transactions: [],
+			requests: [
+				{
+					sourceId: "REQ-9004",
+					kind: "sepa_payout",
+					invoiceId: "INV-9004",
+					vendorId: "VND-01",
+					amountCents: 15000,
+					currency: "EUR",
+					targetIban: "DE99000000000000888888",
+					requestedBy: "spoof@invalid",
+					reason: "IBAN change attempt",
+					concurrentWithAlert: false,
+				},
+				{
+					sourceId: "REQ-9005",
+					kind: "sepa_payout",
+					invoiceId: "INV-9005",
+					vendorId: "VND-01",
+					amountCents: 40000,
+					currency: "EUR",
+					targetIban: "DE89370400440532013000",
+					requestedBy: "cfo-policy@ledgerproof.internal",
+					reason: "Clean over-limit SEPA payout",
+					concurrentWithAlert: false,
+				},
+			],
+		}
+
+		const autoBroker = new ApprovalBroker(async () => ({
+			approved: true,
+			reason: "Automated policy check",
+			decidedBy: "POLICY_AUTO",
+		}))
+
+		const { state, agent, inferenceInput, handler } = makeHandlerSetup(pack, autoBroker)
+
+		// Immutable SourceStore blocks overwriting an existing ID with modified content
+		expect(() =>
+			state.sourceStore.addRequest({
+				...pack.requests[0],
+				amountCents: 99999,
+			}),
+		).toThrow(/Immutable SourceStore violation/)
+
+		// POLICY_AUTO must not approve BEC_IBAN_CHANGE
+		const becNext = await handler.handle(
+			makeToolTransition(
+				"propose_sepa_payout",
+				{
+					requestId: "REQ-9004",
+					invoiceId: "INV-9004",
+					vendorId: "VND-01",
+					amountCents: 15000,
+					targetIban: "DE99000000000000888888",
+					expectedVersion: 1,
+					citations: [
+						{ sourceId: "INV-9004", field: "amountCents", expectedValue: 15000 },
+						{ sourceId: "REQ-9004", field: "amountCents", expectedValue: 15000 },
+					],
+				},
+				inferenceInput,
+			),
+		)
+		expect(becNext.nextStateId).toBe("inference")
+		expect(state.rejectedAttempts.some((r) => r.code === "HUMAN_REQUIRED_FOR_IBAN_CHANGE")).toBe(true)
+
+		// POLICY_AUTO approving clean over-limit transfer records AUTO_POLICY (not HUMAN)
+		const cleanArgs = {
+			requestId: "REQ-9005",
+			invoiceId: "INV-9005",
+			vendorId: "VND-01",
+			amountCents: 40000,
+			targetIban: "DE89370400440532013000",
+			expectedVersion: 1,
+			citations: [
+				{ sourceId: "INV-9005", field: "amountCents", expectedValue: 40000 },
+				{ sourceId: "REQ-9005", field: "amountCents", expectedValue: 40000 },
+			],
+		}
+		const cleanNext = await handler.handle(makeToolTransition("propose_sepa_payout", cleanArgs, inferenceInput))
+		expect(cleanNext.nextStateId).toBe("function_call")
+		const sepaTool = agent.getTools().find((t) => t.name === "propose_sepa_payout")!
+		const toolRes = (await sepaTool.invoke(cleanArgs as never)) as { ok: boolean; approvedBy: string }
+		expect(toolRes.ok).toBe(true)
+		expect(toolRes.approvedBy).toBe("AUTO_POLICY")
+		expect(state.getCell("INV-9005")!.read().value.sepaDraft?.approvedBy).toBe("AUTO_POLICY")
+	})
 })

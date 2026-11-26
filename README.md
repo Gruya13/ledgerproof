@@ -86,7 +86,7 @@ npm run ui  # Toggle "Live" mode in the Web UI header
 
 | Run | Mode / Seed | Scale | Concurrency & Loops | 0-Token Strict Matches | ProofGate Catches & Invariants |
 |---|---|---|---|---|---|
-| `npm test` | `MockInferenceRunner` + HTTP/SSE + Unit | `9` suites / `22` tests | Full concurrent E2E & stream | Deterministic pass | `inventedNumbersLeaked = 0`, L1 IBAN/kind binding, post-HITL staleness, refund balance, ISO 20022 XML verified |
+| `npm test` | `MockInferenceRunner` + HTTP/SSE + Unit | `9` suites / `24` tests | Full concurrent E2E & stream | Deterministic pass | `inventedNumbersLeaked = 0`, L1 IBAN/kind/citation binding, immutable `SourceStore`, post-HITL staleness, refund balance, `<DbtrAgt>` XML |
 | `npm run proof` | `MockInferenceRunner` (fixed pack) | `12/12` invoices | `18` peak concurrent, `22/22` finished | `10` | `1` CAS conflict stopped, `1` L1 blocked, `1` `STALE`, `1` HITL, `0` leaked |
 | `npm start -- --stream --ticks 80` | Live `deepseek-chat`, seed `2811646950` | `80` ticks (`26` traps), `83/83` invoices closed | `12` peak concurrent, `99/99` finished | `74` | Live L1 catch `REJ-2` (`$28,865.00` vs `$288.65` on `TX-5013`), `10` HITL, `2` `STALE`, `0` leaked |
 | `npm start -- --stream --ticks 10` | Live `deepseek-chat`, seed `916840450` | `10` ticks (`3` traps), `9/9` invoices closed | `9` peak concurrent, `14/14` finished | `8` | `1` live L2 CAS write-skew stopped (`INV-2003`), `3` EUR `pain.001` drafts, `0` false L1 blocks, `0` leaked |

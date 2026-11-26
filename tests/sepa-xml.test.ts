@@ -52,6 +52,11 @@ describe("ISO 20022 SEPA pain.001.001.09 XML generator", () => {
 		expect(artifact.xml).toContain('<InstdAmt Ccy="EUR">195.00</InstdAmt>')
 		expect(artifact.xml).toContain("<IBAN>CZ6508000000192000145399</IBAN>")
 		expect(artifact.xml).toContain("<Nm>Studio &amp; Pixel &lt;GmbH&gt;</Nm>")
+		expect(artifact.xml).toContain("<DbtrAgt>")
+		expect(artifact.xml).toContain("<FinInstnId>")
+		expect(artifact.xml).toContain("<Id>NOTPROVIDED</Id>")
+		expect(artifact.xml.indexOf("</DbtrAcct>")).toBeLessThan(artifact.xml.indexOf("<DbtrAgt>"))
+		expect(artifact.xml.indexOf("</DbtrAgt>")).toBeLessThan(artifact.xml.indexOf("<ChrgBr>SLEV</ChrgBr>"))
 		expect(artifact.xml).toContain("<Ustrd>SYNTHETIC INV-1012 PO-7712 v3 AUTO_POLICY</Ustrd>")
 	})
 

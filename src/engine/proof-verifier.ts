@@ -202,6 +202,15 @@ export function verifyToolProposal(
 					reason: `Request ${req.sourceId} has kind="${req.kind}", expected "refund"`,
 				}
 			}
+
+			const citedIds = new Set((args.citations ?? []).map((c) => c.sourceId))
+			if (!citedIds.has(inv.sourceId) || !citedIds.has(req.sourceId)) {
+				return {
+					ok: false,
+					code: "INCOMPLETE_CITATIONS",
+					reason: `${toolName} must cite both ${inv.sourceId} and ${req.sourceId}`,
+				}
+			}
 		} else if (toolName === "draft_overdue_chase") {
 			// Overdue chase amount must match remaining balance (verified via citations on invoice + partial tx)
 			const citedIds = new Set((args.citations ?? []).map((c) => c.sourceId))
