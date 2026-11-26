@@ -28,6 +28,7 @@ export function loadGroundTruth(
 
 export interface ScenarioOptions {
 	runner?: InferenceRunner
+	useNativeRunner?: boolean
 	modelName?: string
 	approvalHandler?: ApprovalHandler
 	log?: StreamLogger
@@ -36,7 +37,7 @@ export interface ScenarioOptions {
 
 export async function runBlackFridayScenario(options: ScenarioOptions = {}): Promise<LedgerState> {
 	const pack = options.pack ?? loadPack()
-	const runner = options.runner ?? new MockInferenceRunner()
+	const runner = options.useNativeRunner ? undefined : (options.runner ?? new MockInferenceRunner())
 	const modelName = options.modelName ?? "deepseek-chat"
 	const approvalBroker = new ApprovalBroker(options.approvalHandler)
 	const rt = createLedgerRuntime()
@@ -44,7 +45,7 @@ export async function runBlackFridayScenario(options: ScenarioOptions = {}): Pro
 
 	rt.initializeRuntime({
 		state,
-		inferenceRunnerConfig: { runner },
+		inferenceRunnerConfig: runner ? { runner } : undefined,
 	})
 
 	const ingestor = createIngestorParticipant()

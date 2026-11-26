@@ -214,10 +214,12 @@ export class ProofGateInterceptionHandler implements InterceptionHandler {
 
 				state.pendingApprovals.set(approval.approvalId, approval)
 				state.metrics.humanApprovalsRouted += 1
+				state.notifyChange()
 				this.rt.sendEvent(SemanticEvent.create("human.required", this.agentId, approval), this.agentId)
 
 				const decision = await state.approvalBroker.requestApproval(approval)
 				state.pendingApprovals.delete(approval.approvalId)
+				state.notifyChange()
 				state.logAudit("human.decision", decision.decidedBy, args.invoiceId, {
 					approvalId: approval.approvalId,
 					approved: decision.approved,

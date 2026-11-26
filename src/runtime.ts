@@ -73,6 +73,7 @@ export class LedgerState extends RuntimeState {
 	private readonly arrivedRequests = new Set<string>()
 	private readonly activeLoopsByKey = new Map<string, AgentSpan>()
 	private readonly idleWaiters: Array<() => void> = []
+	private readonly changeListeners = new Set<() => void>()
 	private pendingExternalWork = 0
 	private auditSeq = 0
 
@@ -154,6 +155,7 @@ export class LedgerState extends RuntimeState {
 		}
 		this.metrics.spans.push(span)
 		this.activeLoopsByKey.set(spanId, span)
+		this.notifyChange()
 		return spanId
 	}
 
@@ -161,6 +163,7 @@ export class LedgerState extends RuntimeState {
 		const span = this.activeLoopsByKey.get(spanId)
 		if (span) {
 			span.loopId = loopId
+			this.notifyChange()
 		}
 	}
 
@@ -180,6 +183,7 @@ export class LedgerState extends RuntimeState {
 		this.activeLoopsByKey.delete(span.spanId)
 		this.metrics.activeLoops = Math.max(0, this.metrics.activeLoops - 1)
 		this.metrics.totalLoopsFinished += 1
+		this.notifyChange()
 		this.checkIdle()
 	}
 
@@ -191,7 +195,47 @@ export class LedgerState extends RuntimeState {
 		this.activeLoopsByKey.delete(spanId)
 		this.metrics.activeLoops = Math.max(0, this.metrics.activeLoops - 1)
 		this.metrics.totalLoopsFinished += 1
+		this.notifyChange()
 		this.checkIdle()
+	}
+
+	onChange(listener: () => void): () => void {
+		this.changeListeners.add(listener)
+		return () => {
+			this.changeListeners.delete(listener)
+		}
+	}
+
+	notifyChange(): void {
+		for (const listener of this.changeListeners) {
+			try {
+				listener()
+			} catch {
+				// ignore listener errors
+			}
+		}
+	}
+
+	toSnapshot() {
+		const cells = [...this.cells.entries()].map(([invoiceId, cell]) => {
+			const snap = cell.read()
+			return {
+				invoiceId,
+				version: snap.version,
+				record: snap.value,
+			}
+		})
+		return {
+			spendingLimitCents: this.spendingLimitCents,
+			cells,
+			unmatchedTxIds: [...this.unmatchedTxIds],
+			nonInvoiceFeeTxIds: [...this.nonInvoiceFeeTxIds],
+			claims: structuredClone(this.claims),
+			rejectedAttempts: structuredClone(this.rejectedAttempts),
+			pendingApprovals: [...this.pendingApprovals.values()].map((a) => structuredClone(a)),
+			metrics: structuredClone(this.metrics),
+			auditLog: structuredClone(this.auditLog),
+		}
 	}
 
 	async waitForIdle(timeoutMs = 15000): Promise<void> {
@@ -293,6 +337,7 @@ export class LedgerState extends RuntimeState {
 			targetId,
 			detail,
 		})
+		this.notifyChange()
 	}
 }
 

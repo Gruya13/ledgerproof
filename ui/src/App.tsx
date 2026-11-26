@@ -1,0 +1,544 @@
+import { useEffect, useState } from "react"
+import { SourceDrawer } from "./components/SourceDrawer"
+import { SwimlaneChart } from "./components/SwimlaneChart"
+import type { SessionSnapshot, SourceInspectPayload } from "./types"
+
+function formatUsd(cents: number): string {
+	return `$${(cents / 100).toFixed(2)}`
+}
+
+function statusBadgeClass(status: string): string {
+	switch (status) {
+		case "MATCHED":
+			return "badge badge-matched"
+		case "SEPA_DRAFT_READY":
+			return "badge badge-sepa"
+		case "PARTIAL":
+			return "badge badge-partial"
+		case "DUPLICATE":
+		case "HOLD_RISK":
+		case "NEEDS_HUMAN":
+			return "badge badge-risk"
+		default:
+			return "badge badge-open"
+	}
+}
+
+export function App() {
+	const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null)
+	const [mode, setMode] = useState<"mock" | "live">("mock")
+	const [tab, setTab] = useState<"ledger" | "rejected" | "claims">("ledger")
+	const [actionError, setActionError] = useState<string | null>(null)
+	const [selectedSource, setSelectedSource] = useState<SourceInspectPayload | null>(null)
+	const [sourceLoading, setSourceLoading] = useState(false)
+	const [sourceError, setSourceError] = useState<string | null>(null)
+
+	useEffect(() => {
+		let active = true
+		fetch("/api/state")
+			.then((r) => r.json())
+			.then((data: SessionSnapshot) => {
+				if (active) setSnapshot(data)
+			})
+			.catch((err) => {
+				if (active) setActionError(String(err))
+			})
+
+		const es = new EventSource("/api/events")
+		es.addEventListener("snapshot", (ev) => {
+			if (!active) return
+			try {
+				setSnapshot(JSON.parse((ev as MessageEvent).data) as SessionSnapshot)
+			} catch {
+				// ignore malformed SSE packet
+			}
+		})
+
+		return () => {
+			active = false
+			es.close()
+		}
+	}, [])
+
+	async function inspectSource(id: string) {
+		setSourceLoading(true)
+		setSourceError(null)
+		try {
+			const res = await fetch(`/api/source/${encodeURIComponent(id)}`)
+			const data = (await res.json()) as SourceInspectPayload & { error?: string }
+			if (!res.ok) {
+				setSourceError(data.error ?? `Source ${id} not found`)
+			} else {
+				setSelectedSource(data)
+			}
+		} catch (err) {
+			setSourceError(String(err))
+		} finally {
+			setSourceLoading(false)
+		}
+	}
+
+	async function startRun(manualLateSettlement: boolean, autoApprovePolicy: boolean) {
+		setActionError(null)
+		const res = await fetch("/api/run", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				mode,
+				manualLateSettlement,
+				autoApprovePolicy,
+			}),
+		})
+		const data = (await res.json()) as { ok: boolean; error?: string }
+		if (!res.ok || !data.ok) {
+			setActionError(data.error ?? "Failed to start run")
+		}
+	}
+
+	async function handleApproval(approvalId: string, approved: boolean) {
+		setActionError(null)
+		const res = await fetch(`/api/approvals/${encodeURIComponent(approvalId)}`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				approved,
+				reason: approved
+					? "Operator approved in LedgerProof Web UI"
+					: "Operator rejected due to BEC IBAN mismatch / risk",
+			}),
+		})
+		const data = (await res.json()) as { ok: boolean; error?: string }
+		if (!res.ok || !data.ok) {
+			setActionError(data.error ?? "Failed to submit approval")
+		}
+	}
+
+	async function handleInjectLate() {
+		setActionError(null)
+		const res = await fetch("/api/inject-late", { method: "POST" })
+		const data = (await res.json()) as { ok: boolean; error?: string }
+		if (!res.ok || !data.ok) {
+			setActionError(data.error ?? "Failed to inject late settlement")
+		}
+	}
+
+	function renderLogWithCitations(text: string) {
+		const parts = text.split(/(\[src:[A-Z]+-\d+\])/g)
+		return parts.map((part, idx) => {
+			const match = part.match(/^\[src:([A-Z]+-\d+)\]$/)
+			if (match) {
+				return (
+					<button
+						key={idx}
+						type="button"
+						className="src-pill mono"
+						onClick={() => void inspectSource(match[1])}
+					>
+						{match[1]}
+					</button>
+				)
+			}
+			return <span key={idx}>{part}</span>
+		})
+	}
+
+	const m = snapshot?.metrics
+
+	return (
+		<div className="app-shell">
+			<div className="disclaimer-bar">
+				<span>
+					<strong>Compliance Notice:</strong> {snapshot?.disclaimer ?? "100% synthetic data only. Not financial advice."}
+				</span>
+				<span className="mono">
+					Status: <strong>{snapshot?.status ?? "CONNECTING"}</strong> · Engine: {snapshot?.providerLabel ?? "Mozaik @6.0.0"}
+				</span>
+			</div>
+
+			<header className="topbar">
+				<div className="brand">
+					<h1>
+						LedgerProof <span className="brand-tag">Mozaik @6.0.0 · Evidence-First Finance</span>
+					</h1>
+					<p>
+						Concurrent Black Friday reconciliation, BEC/fraud risk locks, CAS write-skew defense &amp; controlled SEPA payouts.
+					</p>
+				</div>
+
+				<div className="controls">
+					<div className="mode-switch">
+						<button
+							type="button"
+							className={`mode-btn ${mode === "mock" ? "active" : ""}`}
+							onClick={() => setMode("mock")}
+						>
+							Mock Mode (0 keys)
+						</button>
+						<button
+							type="button"
+							className={`mode-btn ${mode === "live" ? "active" : ""}`}
+							disabled={!snapshot?.availableLiveProvider}
+							title={
+								snapshot?.availableLiveProvider
+									? `Use ${snapshot.availableLiveProvider.label}`
+									: "Set DEEPSEEK_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY in .env"
+							}
+							onClick={() => setMode("live")}
+						>
+							{snapshot?.availableLiveProvider
+								? `Live: ${snapshot.availableLiveProvider.provider.toUpperCase()}`
+								: "Live LLM (no key)"}
+						</button>
+					</div>
+
+					<button
+						type="button"
+						className="btn btn-primary"
+						onClick={() => void startRun(true, false)}
+					>
+						Start Interactive Stream
+					</button>
+
+					<button
+						type="button"
+						className="btn"
+						onClick={() => void startRun(false, true)}
+					>
+						Run Full Auto
+					</button>
+
+					<button
+						type="button"
+						className={`btn ${snapshot?.canInjectLateSettlement ? "btn-amber" : ""}`}
+						disabled={!snapshot?.canInjectLateSettlement}
+						onClick={() => void handleInjectLate()}
+					>
+						{snapshot?.lateSettlementInjected ? "TX-2017 Settled" : "Inject Late Settlement (TX-2017)"}
+					</button>
+
+					<a className="btn" href="/api/audit.jsonl" download="ledgerproof-audit-trace.jsonl">
+						Export JSONL
+					</a>
+				</div>
+			</header>
+
+			{actionError && <div className="error-banner">{actionError}</div>}
+
+			<section className="kpi-grid">
+				<div className="kpi-card">
+					<div className="kpi-label">Peak Concurrent Loops</div>
+					<div className="kpi-value mono" style={{ color: "#38bdf8" }}>
+						{m?.peakConcurrentLoops ?? 0}
+					</div>
+					<div className="kpi-sub">
+						{m ? `${m.totalLoopsFinished}/${m.totalLoopsStarted} loops finished` : "waiting"}
+					</div>
+				</div>
+				<div className="kpi-card">
+					<div className="kpi-label">Deterministic Matches</div>
+					<div className="kpi-value mono" style={{ color: "#34d399" }}>
+						{m?.deterministicMatches ?? 0}
+					</div>
+					<div className="kpi-sub">0 LLM tokens used</div>
+				</div>
+				<div className="kpi-card">
+					<div className="kpi-label">L1 Blocked / Leaked</div>
+					<div className="kpi-value mono" style={{ color: "#fb7185" }}>
+						{m?.uncitedNumbersBlocked ?? 0} / {m?.inventedNumbersLeaked ?? 0}
+					</div>
+					<div className="kpi-sub">0 invented numbers leaked</div>
+				</div>
+				<div className="kpi-card">
+					<div className="kpi-label">L2 CAS Write-Skew</div>
+					<div className="kpi-value mono" style={{ color: "#fbbf24" }}>
+						{m?.casConflictsPrevented ?? 0}
+					</div>
+					<div className="kpi-sub">concurrent collisions stopped</div>
+				</div>
+				<div className="kpi-card">
+					<div className="kpi-label">Palimpsest STALE</div>
+					<div className="kpi-value mono" style={{ color: "#c084fc" }}>
+						{m?.staleInvalidations ?? 0}
+					</div>
+					<div className="kpi-sub">chase drafts auto-invalidated</div>
+				</div>
+				<div className="kpi-card">
+					<div className="kpi-label">L3 Human HITL</div>
+					<div className="kpi-value mono" style={{ color: "#fde68a" }}>
+						{m?.humanApprovalsRouted ?? 0}
+					</div>
+					<div className="kpi-sub">limit ${((snapshot?.spendingLimitCents ?? 25000) / 100).toFixed(0)} / IBAN guard</div>
+				</div>
+			</section>
+
+			{(snapshot?.pendingApprovals ?? []).map((approval) => (
+				<section key={approval.approvalId} className="hitl-card">
+					<div className="hitl-meta">
+						<h3>
+							ProofGate L3 Human Approval Required — {approval.requestId} ({formatUsd(approval.amountCents)})
+						</h3>
+						<p>{approval.reason}</p>
+						<div>
+							<span className="badge badge-risk" style={{ marginRight: 6 }}>
+								Only this loop is paused — peer Mozaik agents continue running
+							</span>
+							{approval.citations.map((c, idx) => (
+								<button
+									key={idx}
+									type="button"
+									className="src-pill mono"
+									onClick={() => void inspectSource(c.sourceId)}
+								>
+									src:{c.sourceId}.{c.field}
+								</button>
+							))}
+						</div>
+					</div>
+					<div className="hitl-actions">
+						<button
+							type="button"
+							className="btn btn-danger"
+							onClick={() => void handleApproval(approval.approvalId, false)}
+						>
+							Reject Payout (Lock HOLD_RISK)
+						</button>
+						<button
+							type="button"
+							className="btn btn-success"
+							onClick={() => void handleApproval(approval.approvalId, true)}
+						>
+							Approve Payout
+						</button>
+					</div>
+				</section>
+			))}
+
+			<SwimlaneChart
+				spans={m?.spans ?? []}
+				peakConcurrentLoops={m?.peakConcurrentLoops ?? 0}
+				onInspectSource={(id) => void inspectSource(id)}
+			/>
+
+			<div className="workspace-grid">
+				<div className="card">
+					<div className="tabs">
+						<button
+							type="button"
+							className={`tab-btn ${tab === "ledger" ? "active" : ""}`}
+							onClick={() => setTab("ledger")}
+						>
+							Verified Ledger ({snapshot?.cells.length ?? 0})
+						</button>
+						<button
+							type="button"
+							className={`tab-btn ${tab === "rejected" ? "active" : ""}`}
+							onClick={() => setTab("rejected")}
+						>
+							Blocked / Rejected Claims ({snapshot?.rejectedAttempts.length ?? 0})
+						</button>
+						<button
+							type="button"
+							className={`tab-btn ${tab === "claims" ? "active" : ""}`}
+							onClick={() => setTab("claims")}
+						>
+							Claims &amp; Skeptic Audit ({snapshot?.claims.length ?? 0})
+						</button>
+					</div>
+
+					{tab === "ledger" && (
+						<>
+							<table className="ledger-table">
+								<thead>
+									<tr>
+										<th>Invoice</th>
+										<th>Status</th>
+										<th>Paid / Expected</th>
+										<th>Matched Sources</th>
+										<th>Risks &amp; Drafts</th>
+									</tr>
+								</thead>
+								<tbody>
+									{(snapshot?.cells ?? []).map(({ invoiceId, version, record }) => (
+										<tr key={invoiceId}>
+											<td className="mono">
+												<button
+													type="button"
+													className="src-pill mono"
+													onClick={() => void inspectSource(invoiceId)}
+												>
+													{invoiceId}
+												</button>
+												<div style={{ fontSize: 11, color: "var(--muted)" }}>
+													v{version} · {record.vendorId}
+												</div>
+											</td>
+											<td>
+												<span className={statusBadgeClass(record.status)}>{record.status}</span>
+											</td>
+											<td className="mono">
+												{formatUsd(record.paidAmountCents)} / {formatUsd(record.expectedAmountCents)}
+											</td>
+											<td>
+												{record.matchedTxIds.length > 0 ? (
+													record.matchedTxIds.map((txId) => (
+														<button
+															key={txId}
+															type="button"
+															className="src-pill mono"
+															onClick={() => void inspectSource(txId)}
+														>
+															{txId}
+														</button>
+													))
+												) : (
+													<span style={{ color: "var(--muted)" }}>—</span>
+												)}
+											</td>
+											<td>
+												{record.riskFlags.map((flag) => (
+													<span key={flag} className="badge badge-risk" style={{ marginRight: 4, marginBottom: 2 }}>
+														{flag}
+													</span>
+												))}
+												{record.sepaDraft && (
+													<div style={{ fontSize: 11, color: "#7dd3fc", marginTop: 2 }}>
+														SEPA {record.sepaDraft.requestId} ({record.sepaDraft.approvedBy})
+													</div>
+												)}
+												{record.drafts.map((d) => (
+													<div key={d.draftId} style={{ marginTop: 3 }}>
+														<span className={d.status === "STALE" ? "badge badge-stale" : "badge badge-partial"}>
+															{d.kind}: {d.status}
+														</span>
+													</div>
+												))}
+											</td>
+										</tr>
+									))}
+								</tbody>
+							</table>
+
+							<div style={{ marginTop: 14, display: "flex", flexWrap: "wrap", gap: 16, fontSize: 12.5 }}>
+								<div>
+									<strong style={{ color: "#fcd34d" }}>Unmatched / Orphan Wires: </strong>
+									{(snapshot?.unmatchedTxIds ?? []).length === 0 ? (
+										<span style={{ color: "var(--muted)" }}>None yet</span>
+									) : (
+										snapshot!.unmatchedTxIds.map((id) => (
+											<button
+												key={id}
+												type="button"
+												className="src-pill mono"
+												onClick={() => void inspectSource(id)}
+											>
+												{id}
+											</button>
+										))
+									)}
+								</div>
+								<div>
+									<strong style={{ color: "var(--muted)" }}>Operational Gateway Fees: </strong>
+									{(snapshot?.nonInvoiceFeeTxIds ?? []).map((id) => (
+										<button
+											key={id}
+											type="button"
+											className="src-pill mono"
+											onClick={() => void inspectSource(id)}
+										>
+											{id}
+										</button>
+									))}
+								</div>
+							</div>
+						</>
+					)}
+
+					{tab === "rejected" && (
+						<div className="list-stack">
+							{(snapshot?.rejectedAttempts ?? []).length === 0 ? (
+								<div style={{ color: "var(--muted)", fontSize: 13 }}>
+									No blocked claims yet. Run the Black Friday stream to watch ProofGate L1/L2/L3 intercept unsafe actions.
+								</div>
+							) : (
+								snapshot!.rejectedAttempts.map((rej) => (
+									<div key={rej.id} className="item-box rejected">
+										<div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+											<strong>
+												<span className="mono">[{rej.id}]</span> {rej.agentName}.{rej.actionName}
+											</strong>
+											<span className="badge badge-risk">
+												{rej.level} · {rej.code}
+											</span>
+										</div>
+										<div>{rej.reason}</div>
+									</div>
+								))
+							)}
+						</div>
+					)}
+
+					{tab === "claims" && (
+						<div className="list-stack">
+							{(snapshot?.claims ?? []).map((claim) => (
+								<div key={claim.claimId} className="item-box">
+									<div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 4 }}>
+										<strong>
+											{claim.producer} · {claim.kind} ({formatUsd(claim.amountCents)})
+										</strong>
+										<span className={claim.auditStatus === "CONFIRMED" ? "badge badge-matched" : "badge badge-partial"}>
+											Audit: {claim.auditStatus}
+										</span>
+									</div>
+									<div style={{ marginBottom: 6 }}>{claim.summary}</div>
+									<div>
+										{claim.citations.map((c, idx) => (
+											<button
+												key={idx}
+												type="button"
+												className="src-pill mono"
+												onClick={() => void inspectSource(c.sourceId)}
+											>
+												src:{c.sourceId}.{c.field}={String(c.expectedValue)}
+											</button>
+										))}
+									</div>
+								</div>
+							))}
+						</div>
+					)}
+				</div>
+
+				<div className="right-col">
+					<SourceDrawer
+						selectedSource={selectedSource}
+						loading={sourceLoading}
+						error={sourceError}
+						onInspectSource={(id) => void inspectSource(id)}
+					/>
+
+					<div className="card">
+						<div className="card-header">
+							<h2>Live Mozaik Event Stream</h2>
+							<span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>
+								{snapshot?.logs.length ?? 0} events
+							</span>
+						</div>
+						<div className="log-stream">
+							{(snapshot?.logs ?? []).length === 0 ? (
+								<div style={{ color: "var(--muted)" }}>
+									Waiting for stream… click <strong>Start Interactive Stream</strong> above.
+								</div>
+							) : (
+								snapshot!.logs.map((entry) => (
+									<div key={entry.id} className="log-line">
+										{renderLogWithCitations(entry.text)}
+									</div>
+								))
+							)}
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	)
+}

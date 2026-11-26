@@ -61,10 +61,10 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 			if (!cell) return { ok: false, reason: "Unknown invoice" }
 
 			const snap = cell.read()
-			const expectedVersion = args.expectedVersion ?? snap.version
 			const approvedBy = args.amountCents > state.spendingLimitCents ? "HUMAN" : "AUTO_POLICY"
+			const casVersion = approvedBy === "HUMAN" ? snap.version : (args.expectedVersion ?? snap.version)
 
-			const casRes = cell.casWrite(expectedVersion, (cur) => ({
+			const casRes = cell.casWrite(casVersion, (cur) => ({
 				...cur,
 				status: "SEPA_DRAFT_READY",
 				sepaDraft: {
