@@ -229,4 +229,35 @@ describe("ProofVerifier L1 deterministic source & math gates", () => {
 		expect(refundIncomplete.ok).toBe(false)
 		expect(refundIncomplete.code).toBe("INCOMPLETE_CITATIONS")
 	})
+
+	it("blocks propose_refund when request vendorId does not match invoice vendorId", () => {
+		const crossVendorStore = SourceStore.fromPack(loadPack())
+		crossVendorStore.addRequest({
+			sourceId: "REQ-9992",
+			kind: "refund",
+			invoiceId: "INV-1011",
+			vendorId: "VND-01",
+			amountCents: 31000,
+			currency: "USD",
+			targetIban: null,
+			requestedBy: "attacker@invalid",
+			reason: "Cross-vendor refund attempt",
+			concurrentWithAlert: false,
+		})
+		const res = verifyToolProposal(
+			"propose_refund",
+			{
+				requestId: "REQ-9992",
+				invoiceId: "INV-1011",
+				amountCents: 31000,
+				citations: [
+					{ sourceId: "INV-1011", field: "amountCents", expectedValue: 31000 },
+					{ sourceId: "REQ-9992", field: "amountCents", expectedValue: 31000 },
+				],
+			},
+			crossVendorStore,
+		)
+		expect(res.ok).toBe(false)
+		expect(res.code).toBe("VENDOR_MISMATCH")
+	})
 })

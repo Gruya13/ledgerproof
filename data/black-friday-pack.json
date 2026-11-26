@@ -388,7 +388,7 @@
       "vendorId": "VND-04",
       "amountCents": 64000,
       "currency": "EUR",
-      "targetIban": "EE991100998877665544",
+      "targetIban": "EE421100998877665544",
       "requestedBy": "email-override@baltic-support-fake.example",
       "reason": "Urgent Black Friday vendor bank detail update",
       "concurrentWithAlert": false

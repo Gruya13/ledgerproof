@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { generateSepaPain001Draft } from "../src/engine/sepa-xml"
+import { generateSepaPain001Draft, isValidIban } from "../src/engine/sepa-xml"
 import type { Invoice, PaymentRequest, Vendor } from "../src/types"
 
 describe("ISO 20022 SEPA pain.001.001.09 XML generator", () => {
@@ -52,12 +52,39 @@ describe("ISO 20022 SEPA pain.001.001.09 XML generator", () => {
 		expect(artifact.xml).toContain('<InstdAmt Ccy="EUR">195.00</InstdAmt>')
 		expect(artifact.xml).toContain("<IBAN>CZ6508000000192000145399</IBAN>")
 		expect(artifact.xml).toContain("<Nm>Studio &amp; Pixel &lt;GmbH&gt;</Nm>")
+		expect(artifact.xml).toContain("<IBAN>DE77100000000000000000</IBAN>")
 		expect(artifact.xml).toContain("<DbtrAgt>")
 		expect(artifact.xml).toContain("<FinInstnId>")
 		expect(artifact.xml).toContain("<Id>NOTPROVIDED</Id>")
 		expect(artifact.xml.indexOf("</DbtrAcct>")).toBeLessThan(artifact.xml.indexOf("<DbtrAgt>"))
 		expect(artifact.xml.indexOf("</DbtrAgt>")).toBeLessThan(artifact.xml.indexOf("<ChrgBr>SLEV</ChrgBr>"))
 		expect(artifact.xml).toContain("<Ustrd>SYNTHETIC INV-1012 PO-7712 v3 AUTO_POLICY</Ustrd>")
+	})
+
+	it("validates ISO 13616 mod-97 IBAN checksums for debtor and creditor IBANs", () => {
+		expect(isValidIban("DE77100000000000000000")).toBe(true)
+		expect(isValidIban("DE00100000000000000000")).toBe(false)
+
+		expect(() =>
+			generateSepaPain001Draft({
+				invoice: eurInvoice,
+				vendor: baseVendor,
+				request: { ...eurRequest, targetIban: "DE00100000000000000000" },
+				approvedBy: "AUTO_POLICY",
+				cellVersion: 2,
+			}),
+		).toThrow(/mod-97/i)
+
+		expect(() =>
+			generateSepaPain001Draft({
+				invoice: eurInvoice,
+				vendor: baseVendor,
+				request: eurRequest,
+				approvedBy: "AUTO_POLICY",
+				cellVersion: 2,
+				debtorIban: "DE00100000000000000000",
+			}),
+		).toThrow(/mod-97/i)
 	})
 
 	it("rejects non-EUR invoice or request", () => {

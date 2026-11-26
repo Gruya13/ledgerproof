@@ -1,5 +1,6 @@
 import type { BankTransaction, Invoice, PaymentRequest, Vendor } from "../types"
 import { formatMoney } from "./currency"
+import { buildValidSyntheticIban } from "./sepa-xml"
 
 export type TrapKind =
 	| "split_typo"
@@ -426,8 +427,9 @@ export class ContinuousStreamGenerator {
 		const txId = this.nextTxId()
 		const reqId = this.nextReqId()
 		const amountCents = this.variedCents(315, 1490)
-		const spoofSuffix = String(100000 + Math.floor(this.rand() * 899999))
-		const spoofedIban = `${vendor.country}99000099${spoofSuffix}`
+		const bbanLen = Math.max(11, vendor.masterIban.replace(/\s+/g, "").length - 4)
+		const spoofBban = `99${String(100000 + Math.floor(this.rand() * 899999))}`.padEnd(bbanLen, "0").slice(0, bbanLen)
+		const spoofedIban = buildValidSyntheticIban(vendor.country, spoofBban)
 
 		const inv: Invoice = {
 			sourceId: invId,

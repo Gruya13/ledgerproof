@@ -34,6 +34,42 @@ function normalizeIban(iban: string): string {
 	return iban.replace(/\s+/g, "").toUpperCase()
 }
 
+function ibanMod97(numericInput: string): number {
+	const digits = numericInput.replace(/[A-Z]/g, (ch) => String(ch.charCodeAt(0) - 55))
+	let rem = 0
+	for (const ch of digits) {
+		rem = (rem * 10 + Number(ch)) % 97
+	}
+	return rem
+}
+
+/**
+ * Validates IBAN format and ISO 13616 mod-97 checksum === 1.
+ */
+export function isValidIban(iban: string): boolean {
+	const clean = normalizeIban(iban)
+	if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(clean)) {
+		return false
+	}
+	const rearranged = `${clean.slice(4)}${clean.slice(0, 4)}`
+	return ibanMod97(rearranged) === 1
+}
+
+/**
+ * Generates a syntactically valid synthetic IBAN (ISO 13616 mod-97 checksum === 1)
+ * for demo/testing without real bank account data.
+ */
+export function buildValidSyntheticIban(country: string, bban: string): string {
+	const cc = country.trim().toUpperCase()
+	const cleanBban = bban.replace(/\s+/g, "").toUpperCase()
+	if (!/^[A-Z]{2}$/.test(cc) || !/^[A-Z0-9]{11,30}$/.test(cleanBban)) {
+		throw new Error(`Invalid synthetic IBAN inputs: country=${country}, bban=${bban}`)
+	}
+	const rem = ibanMod97(`${cleanBban}${cc}00`)
+	const checkDigits = String(98 - rem).padStart(2, "0")
+	return `${cc}${checkDigits}${cleanBban}`
+}
+
 export function generateSepaPain001Draft(input: SepaPain001Input): SepaDraftArtifact {
 	if (input.invoice.currency !== "EUR" || input.request.currency !== "EUR") {
 		throw new Error(
@@ -47,8 +83,17 @@ export function generateSepaPain001Draft(input: SepaPain001Input): SepaDraftArti
 	}
 
 	const creditorIban = normalizeIban(rawTargetIban)
+	if (!isValidIban(creditorIban)) {
+		throw new Error(
+			`SEPA pain.001 creditor IBAN "${creditorIban}" on ${input.request.sourceId} failed ISO 13616 mod-97 checksum`,
+		)
+	}
+
 	const debtorName = input.debtorName ?? "LedgerProof Synthetic Demo Entity"
-	const debtorIban = normalizeIban(input.debtorIban ?? "DE00100000000000000000")
+	const debtorIban = normalizeIban(input.debtorIban ?? "DE77100000000000000000")
+	if (!isValidIban(debtorIban)) {
+		throw new Error(`SEPA pain.001 debtor IBAN "${debtorIban}" failed ISO 13616 mod-97 checksum`)
+	}
 	const createdAt = input.createdAt ?? new Date().toISOString()
 	const execDate = createdAt.slice(0, 10)
 	const messageId = `LP-${input.request.sourceId}-${input.invoice.sourceId}`

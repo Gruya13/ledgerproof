@@ -13,7 +13,7 @@
 LedgerProof unifies three Traditional Finance workflows from the hackathon brief on a reactive multi-agent event bus:
 1. **Reconciliation & Exception Resolution** — deterministic `StrictMatcher` settles clean 1:1 invoices with `0` LLM tokens, while `Reconciler` handles split/partial payments and memo typos (`TX-2006 + TX-2007 → INV-1006`).
 2. **Risk Investigation & Duplicate/BEC Guard** — `RiskSentinel` runs concurrently to lock duplicate invoices (`INV-1009`), BEC vendor IBAN changes (`REQ-3002`), currency mismatches, overpayment anomalies, and Black Friday velocity fraud alerts (`TX-2016`).
-3. **Controlled SEPA `pain.001` Payout & Refund Routing** — `PayoutAndRefund` enforces EUR-only SEPA rails (`SEPA_REQUIRES_EUR`), respects spending limits (`$250` / `€250` auto-approve threshold), generates downloadable **ISO 20022 `pain.001.001.09` XML** synthetic drafts (with full 64-char SHA-256 digests via `GET /api/sepa/:invoiceId.xml` — synthetic draft format without external bank/XSD schema submission), and routes high-risk or over-limit transfers through human approval without pausing peer Mozaik loops.
+3. **Controlled SEPA `pain.001` Payout & Refund Routing** — `PayoutAndRefund` enforces EUR-only SEPA rails (`SEPA_REQUIRES_EUR`) and ISO 13616 mod-97 IBAN checksums, respects spending limits (`$250` / `€250` auto-approve threshold), generates downloadable **ISO 20022 `pain.001.001.09` XML** synthetic demo drafts (using `<DbtrAgt>` `NOTPROVIDED` and full 64-char SHA-256 digests via `GET /api/sepa/:invoiceId.xml` — not bank-validated or XSD-submitted), and routes high-risk or over-limit transfers through human approval without pausing peer Mozaik loops.
 
 Every financial conclusion and tool call is mechanically gated by **`ProofGate`** (`InterceptionHandler`):
 - **L1 Source, Currency & Math Gate:** blocks uncited or invented amounts, raw integer `amountCents` mislabeled as USD/EUR, non-EUR SEPA payouts, and invalid IDs mid-loop (`inventedNumbersLeaked = 0`).
@@ -86,7 +86,7 @@ npm run ui  # Toggle "Live" mode in the Web UI header
 
 | Run | Mode / Seed | Scale | Concurrency & Loops | 0-Token Strict Matches | ProofGate Catches & Invariants |
 |---|---|---|---|---|---|
-| `npm test` | `MockInferenceRunner` + HTTP/SSE + Unit | `9` suites / `24` tests | Full concurrent E2E & stream | Deterministic pass | `inventedNumbersLeaked = 0`, L1 IBAN/kind/citation binding, immutable `SourceStore`, post-HITL staleness, refund balance, `<DbtrAgt>` XML |
+| `npm test` | `MockInferenceRunner` + HTTP/SSE + Unit | `9` suites / `26` tests | Full concurrent E2E & stream | Deterministic pass | `inventedNumbersLeaked = 0`, L1 IBAN/vendor/kind/citation binding, IBAN mod-97, immutable `SourceStore`, post-HITL staleness, refund balance, `<DbtrAgt>` XML |
 | `npm run proof` | `MockInferenceRunner` (fixed pack) | `12/12` invoices | `18` peak concurrent, `22/22` finished | `10` | `1` CAS conflict stopped, `1` L1 blocked, `1` `STALE`, `1` HITL, `0` leaked |
 | `npm start -- --stream --ticks 80` | Live `deepseek-chat`, seed `2811646950` | `80` ticks (`26` traps), `83/83` invoices closed | `12` peak concurrent, `99/99` finished | `74` | Live L1 catch `REJ-2` (`$28,865.00` vs `$288.65` on `TX-5013`), `10` HITL, `2` `STALE`, `0` leaked |
 | `npm start -- --stream --ticks 10` | Live `deepseek-chat`, seed `916840450` | `10` ticks (`3` traps), `9/9` invoices closed | `9` peak concurrent, `14/14` finished | `8` | `1` live L2 CAS write-skew stopped (`INV-2003`), `3` EUR `pain.001` drafts, `0` false L1 blocks, `0` leaked |

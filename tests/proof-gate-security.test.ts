@@ -8,6 +8,7 @@ import {
 	type InferenceInput,
 } from "@mozaik-ai/core"
 import { MockInferenceRunner } from "../src/engine/mock-runner"
+import { buildValidSyntheticIban } from "../src/engine/sepa-xml"
 import { ProofGateInterceptionHandler } from "../src/interception/proof-gate"
 import { createPayoutAndRefundAgent } from "../src/participants/payout-refund"
 import { ApprovalBroker, createLedgerRuntime, LedgerState } from "../src/runtime"
@@ -48,6 +49,7 @@ function makeToolTransition(name: string, args: Record<string, unknown>, inferen
 describe("ProofGate security invariants (HITL provenance, post-HITL staleness, refund balance)", () => {
 	it("records approvedBy='HUMAN' for under-limit SEPA payouts approved via IBAN mismatch HITL", async () => {
 		const basePack = loadPack()
+		const spoofedBecIban = buildValidSyntheticIban("DE", "000000000000999999")
 		const pack: BlackFridayPack = {
 			...basePack,
 			invoices: [
@@ -71,7 +73,7 @@ describe("ProofGate security invariants (HITL provenance, post-HITL staleness, r
 					vendorId: "VND-01",
 					amountCents: 15000,
 					currency: "EUR",
-					targetIban: "DE99000000000000999999",
+					targetIban: spoofedBecIban,
 					requestedBy: "cfo-verified@ledgerproof.internal",
 					reason: "Verified bank account migration under €250 limit",
 					concurrentWithAlert: false,
@@ -91,7 +93,7 @@ describe("ProofGate security invariants (HITL provenance, post-HITL staleness, r
 			invoiceId: "INV-9001",
 			vendorId: "VND-01",
 			amountCents: 15000,
-			targetIban: "DE99000000000000999999",
+			targetIban: spoofedBecIban,
 			expectedVersion: 1,
 			citations: [
 				{ sourceId: "INV-9001", field: "amountCents", expectedValue: 15000 },
@@ -309,7 +311,7 @@ describe("ProofGate security invariants (HITL provenance, post-HITL staleness, r
 					vendorId: "VND-01",
 					amountCents: 15000,
 					currency: "EUR",
-					targetIban: "DE99000000000000888888",
+					targetIban: buildValidSyntheticIban("DE", "000000000000888888"),
 					requestedBy: "spoof@invalid",
 					reason: "IBAN change attempt",
 					concurrentWithAlert: false,
@@ -354,7 +356,7 @@ describe("ProofGate security invariants (HITL provenance, post-HITL staleness, r
 					invoiceId: "INV-9004",
 					vendorId: "VND-01",
 					amountCents: 15000,
-					targetIban: "DE99000000000000888888",
+					targetIban: buildValidSyntheticIban("DE", "000000000000888888"),
 					expectedVersion: 1,
 					citations: [
 						{ sourceId: "INV-9004", field: "amountCents", expectedValue: 15000 },

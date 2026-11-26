@@ -149,6 +149,13 @@ export function verifyToolProposal(
 					reason: `Request ${req.sourceId} belongs to ${req.invoiceId}, not ${inv.sourceId}`,
 				}
 			}
+			if (req.vendorId !== inv.vendorId) {
+				return {
+					ok: false,
+					code: "VENDOR_MISMATCH",
+					reason: `Request ${req.sourceId} vendor (${req.vendorId}) does not match invoice ${inv.sourceId} vendor (${inv.vendorId})`,
+				}
+			}
 			if (req.currency !== inv.currency) {
 				return {
 					ok: false,
