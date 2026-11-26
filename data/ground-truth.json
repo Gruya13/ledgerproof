@@ -1,0 +1,64 @@
+{
+  "expectedInvoices": {
+    "INV-1001": {
+      "allowedStatuses": ["MATCHED", "SEPA_DRAFT_READY"],
+      "requiredTxIds": ["TX-2001"]
+    },
+    "INV-1002": {
+      "allowedStatuses": ["MATCHED"],
+      "requiredTxIds": ["TX-2002"]
+    },
+    "INV-1003": {
+      "allowedStatuses": ["MATCHED"],
+      "requiredTxIds": ["TX-2003"]
+    },
+    "INV-1004": {
+      "allowedStatuses": ["MATCHED"],
+      "requiredTxIds": ["TX-2004"]
+    },
+    "INV-1005": {
+      "allowedStatuses": ["MATCHED"],
+      "requiredTxIds": ["TX-2005"]
+    },
+    "INV-1006": {
+      "allowedStatuses": ["MATCHED"],
+      "requiredTxIds": ["TX-2006", "TX-2007"]
+    },
+    "INV-1007": {
+      "allowedStatuses": ["MATCHED"],
+      "requiredTxIds": ["TX-2008", "TX-2017"]
+    },
+    "INV-1008": {
+      "allowedStatuses": ["MATCHED"],
+      "requiredTxIds": ["TX-2009"]
+    },
+    "INV-1009": {
+      "allowedStatuses": ["DUPLICATE", "HOLD_RISK"],
+      "requiredTxIds": [],
+      "requiredRiskFlag": "DUPLICATE_INVOICE"
+    },
+    "INV-1010": {
+      "allowedStatuses": ["HOLD_RISK"],
+      "requiredTxIds": ["TX-2010"],
+      "requiredRiskFlag": "BEC_IBAN_CHANGE"
+    },
+    "INV-1011": {
+      "allowedStatuses": ["NEEDS_HUMAN", "HOLD_RISK"],
+      "requiredTxIds": ["TX-2011"],
+      "requiredRiskFlag": "FRAUD_VELOCITY"
+    },
+    "INV-1012": {
+      "allowedStatuses": ["SEPA_DRAFT_READY"],
+      "requiredTxIds": ["TX-2012"]
+    }
+  },
+  "expectedUnmatchedTxIds": ["TX-2014"],
+  "requiredMetrics": {
+    "minPeakConcurrentLoops": 3,
+    "minCasConflictsPrevented": 1,
+    "minUncitedNumbersBlocked": 1,
+    "maxInventedNumbersLeaked": 0,
+    "minStaleInvalidations": 1,
+    "minHumanApprovalsRouted": 1
+  }
+}

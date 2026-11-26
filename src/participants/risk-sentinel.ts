@@ -1,0 +1,197 @@
+import {
+	createAgent,
+	DeveloperMessageItem,
+	ModelContext,
+	SemanticEvent,
+	SituationSpecification,
+	type Agent,
+	type InferenceInput,
+	type SituationContext,
+	type SituationHandler,
+	type SituationProcessor,
+	type Tool,
+} from "@mozaik-ai/core"
+import type { LedgerRuntimeApi } from "../runtime"
+import { ProofGateInterceptionHandler } from "../interception/proof-gate"
+import type { BankTransaction, Citation, ClaimRecord, Invoice, PaymentRequest, RiskFlag } from "../types"
+
+class RiskTriggerSpec extends SituationSpecification {
+	isSatisfiedBy(context: SituationContext): boolean {
+		const t = context.event.type
+		return t === "invoice.arrived" || t === "transaction.arrived" || t === "request.arrived"
+	}
+}
+
+export function createRiskSentinelAgent(rt: LedgerRuntimeApi, modelName: string): Agent {
+	let selfId = ""
+
+	const flagRiskTool: Tool = {
+		type: "function",
+		name: "flag_risk",
+		description: "Lock an invoice with a verified risk flag (duplicate invoice, BEC IBAN change, or fraud velocity).",
+		strict: false,
+		parameters: {
+			type: "object",
+			properties: {
+				invoiceId: { type: "string" },
+				riskFlag: {
+					type: "string",
+					enum: ["DUPLICATE_INVOICE", "BEC_IBAN_CHANGE", "FRAUD_VELOCITY"],
+				},
+				severity: { type: "string", enum: ["HIGH", "CRITICAL"] },
+				reason: { type: "string" },
+				citations: { type: "array", items: { type: "object" } },
+			},
+			required: ["invoiceId", "riskFlag", "severity", "reason", "citations"],
+		},
+		invoke: async (args: {
+			invoiceId: string
+			riskFlag: RiskFlag
+			severity: string
+			reason: string
+			citations: Citation[]
+		}) => {
+			const state = rt.resolveRuntime().state
+			const cell = state.getCell(args.invoiceId)
+			if (!cell) return { ok: false, reason: `Unknown invoice ${args.invoiceId}` }
+
+			const snap = cell.read()
+			const nextStatus = args.riskFlag === "DUPLICATE_INVOICE" ? "DUPLICATE" : "HOLD_RISK"
+			const casRes = cell.casWrite(snap.version, (cur) => ({
+				...cur,
+				status: nextStatus,
+				riskFlags: cur.riskFlags.includes(args.riskFlag) ? cur.riskFlags : [...cur.riskFlags, args.riskFlag],
+				notes: [...cur.notes, `${args.riskFlag}: ${args.reason}`],
+			}))
+
+			if (!casRes.ok) {
+				// Retry once against updated cell version so risk hold still lands safely
+				const retrySnap = cell.read()
+				cell.casWrite(retrySnap.version, (cur) => ({
+					...cur,
+					status: nextStatus,
+					riskFlags: cur.riskFlags.includes(args.riskFlag) ? cur.riskFlags : [...cur.riskFlags, args.riskFlag],
+					notes: [...cur.notes, `${args.riskFlag}: ${args.reason}`],
+				}))
+			}
+
+			const claim: ClaimRecord = {
+				claimId: `CLM-RISK-${args.invoiceId}-${args.riskFlag}`,
+				invoiceId: args.invoiceId,
+				producer: "RiskSentinel",
+				kind: "RISK_FLAG",
+				amountCents: state.sourceStore.getInvoice(args.invoiceId)?.amountCents ?? 0,
+				summary: args.reason,
+				citations: args.citations,
+				auditStatus: "PENDING",
+				createdAt: new Date().toISOString(),
+			}
+			state.addClaim(claim)
+			rt.sendEvent(SemanticEvent.create("claim.proposed", selfId, { claim }), selfId)
+
+			return { ok: true, invoiceId: args.invoiceId, status: nextStatus, riskFlag: args.riskFlag }
+		},
+	}
+
+	const processor: SituationProcessor = {
+		apply(context: SituationContext): void {
+			const agent = context.participant as Agent
+			selfId = agent.getId()
+			const state = rt.resolveRuntime().state
+
+			let shouldInvokeLlm = false
+			let targetId = ""
+			let eventLabel = context.event.type
+			let payloadForPrompt: Record<string, unknown> = {}
+
+			// Deterministic pre-screening avoids wasting LLM calls on clean normal traffic!
+			if (context.event.type === "invoice.arrived") {
+				const { invoice } = context.event.payload as { invoice: Invoice }
+				state.markInvoiceArrived(invoice.sourceId)
+				const duplicateOf = state
+					.getArrivedInvoices()
+					.find(
+						(other) =>
+							other.sourceId !== invoice.sourceId &&
+							other.vendorId === invoice.vendorId &&
+							other.poNumber === invoice.poNumber &&
+							other.amountCents === invoice.amountCents,
+					)
+				if (duplicateOf) {
+					shouldInvokeLlm = true
+					targetId = invoice.sourceId
+					eventLabel = `invoice.arrived:${invoice.sourceId}`
+					payloadForPrompt = { invoice, duplicateOf }
+				}
+			} else if (context.event.type === "transaction.arrived") {
+				const { transaction } = context.event.payload as { transaction: BankTransaction }
+				if (transaction.kind === "fraud_alert") {
+					shouldInvokeLlm = true
+					targetId = transaction.sourceId
+					eventLabel = `transaction.arrived:${transaction.sourceId}`
+					payloadForPrompt = {
+						transaction,
+						invoice: state.sourceStore.getInvoice(transaction.reference),
+					}
+				}
+			} else if (context.event.type === "request.arrived") {
+				const { request } = context.event.payload as { request: PaymentRequest }
+				const vendor = state.sourceStore.getVendor(request.vendorId)
+				if (request.targetIban && vendor && request.targetIban !== vendor.masterIban) {
+					shouldInvokeLlm = true
+					targetId = request.sourceId
+					eventLabel = `request.arrived:${request.sourceId}`
+					payloadForPrompt = {
+						request,
+						vendor,
+						invoice: state.sourceStore.getInvoice(request.invoiceId),
+					}
+				}
+			}
+
+			if (!shouldInvokeLlm) return
+
+			state.metrics.llmCalls += 1
+			const spanId = state.beginLoop("RiskSentinel", context.event.type, targetId)
+			const freshContext = ModelContext.create().addContextItem(
+				DeveloperMessageItem.create(agent.getDeveloperMessage()),
+			)
+			const inferenceInput: InferenceInput = {
+				model: modelName,
+				context: freshContext,
+				tools: agent.getTools(),
+			}
+
+			const prompt = [
+				`[AGENT:RiskSentinel] [EVENT:${eventLabel}] [span:${spanId}]`,
+				`Investigate suspicious financial signal ${targetId} and lock affected invoice with flag_risk + exact citations.`,
+				"```json",
+				JSON.stringify(payloadForPrompt),
+				"```",
+			].join("\n")
+
+			rt.runLoop(
+				agent.getId(),
+				prompt,
+				inferenceInput,
+				new ProofGateInterceptionHandler(agent.getId(), "RiskSentinel", inferenceInput, rt),
+			)
+		},
+	}
+
+	const handler: SituationHandler = {
+		specification: new RiskTriggerSpec(),
+		processor,
+	}
+
+	const agent = createAgent({
+		name: "RiskSentinel",
+		capabilities: ["duplicate-detection", "bec-iban-guard", "fraud-velocity"],
+		instruction:
+			"You are RiskSentinel, a concurrent financial risk agent. When duplicate invoices, BEC IBAN mismatches, or fraud velocity alerts occur, call flag_risk immediately with exact citations and include [src:ID] tags in your summary.",
+		tools: [flagRiskTool],
+		handlers: [handler],
+	})
+	selfId = agent.getId()
+	return agent
+}
