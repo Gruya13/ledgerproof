@@ -19,6 +19,7 @@ import type {
 	RejectedAttempt,
 } from "./types"
 import { SourceStore } from "./engine/source-store"
+import type { SepaDraftArtifact } from "./engine/sepa-xml"
 import { VersionedCell } from "./engine/versioned-cell"
 
 export type ApprovalHandler = (approval: PendingApproval) => Promise<ApprovalDecision>
@@ -54,6 +55,7 @@ export class LedgerState extends RuntimeState {
 	readonly claims: ClaimRecord[] = []
 	readonly rejectedAttempts: RejectedAttempt[] = []
 	readonly pendingApprovals = new Map<string, PendingApproval>()
+	readonly sepaDraftXmls = new Map<string, SepaDraftArtifact>()
 	readonly auditLog: AuditEntry[] = []
 	readonly approvalBroker: ApprovalBroker
 	readonly metrics: ConcurrencyMetrics = {
@@ -183,6 +185,15 @@ export class LedgerState extends RuntimeState {
 
 	getCell(invoiceId: string): VersionedCell<LedgerRecord> | undefined {
 		return this.cells.get(invoiceId)
+	}
+
+	setSepaDraftXml(artifact: SepaDraftArtifact): void {
+		this.sepaDraftXmls.set(artifact.invoiceId, artifact)
+		this.notifyChange()
+	}
+
+	getSepaDraftXml(invoiceId: string): SepaDraftArtifact | undefined {
+		return this.sepaDraftXmls.get(invoiceId)
 	}
 
 	beginExternalWork(): void {

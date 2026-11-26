@@ -1,4 +1,5 @@
 import { SemanticEvent } from "@mozaik-ai/core"
+import { formatMoney } from "./engine/currency"
 import { resolveLiveProviderFromEnv, resolveMockProvider } from "./engine/provider-factory"
 import { ALL_TRAP_KINDS, ContinuousStreamGenerator, type TrapKind } from "./engine/stream-generator"
 import { createIngestorParticipant } from "./participants/ingestor"
@@ -148,7 +149,7 @@ export class SessionController {
 			}
 
 			this.pushLog(
-				`[ProofGate HITL] Paused ${approval.requestId} ($${(approval.amountCents / 100).toFixed(2)}) — awaiting operator decision`,
+				`[ProofGate HITL] Paused ${approval.requestId} (${formatMoney(approval.amountCents, approval.currency)}) — awaiting operator decision`,
 			)
 			this.emit()
 
@@ -581,6 +582,10 @@ export class SessionController {
 
 	getSource(sourceId: string) {
 		return this.state.sourceStore.get(sourceId)
+	}
+
+	getSepaDraftXml(invoiceId: string) {
+		return this.state.getSepaDraftXml(invoiceId)
 	}
 
 	getAuditJsonl(): string {

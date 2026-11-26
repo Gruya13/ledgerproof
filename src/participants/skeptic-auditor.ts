@@ -141,7 +141,7 @@ export function createSkepticAuditorAgent(rt: LedgerRuntimeApi, modelName: strin
 			"You are SkepticAuditor, an independent adversarial verifier.",
 			"Compare the proposed claim and its citations against the raw SourceStore snapshots in the JSON payload.",
 			"Call submit_audit_verdict with verdict='CONFIRMED' if citations match SourceStore (or 'NEEDS_HUMAN' for high-risk fraud alerts; 'REFUTED' if numbers/sources contradict), reusing exact citations from the verified SourceStore fields.",
-			"In your final text reply, include [src:ID] tags for every ID or dollar amount mentioned.",
+			"All JSON amounts are integer cents — NEVER label raw amountCents with USD/EUR (write '$288.65 (28865 cents)' or '€195.00 (19500 cents)'). In your final text reply, include [src:ID] tags for every ID or monetary amount mentioned.",
 		].join("\n"),
 		tools: [submitAuditVerdictTool],
 		handlers: [handler],

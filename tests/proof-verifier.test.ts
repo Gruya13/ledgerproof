@@ -62,5 +62,41 @@ describe("ProofVerifier L1 deterministic source & math gates", () => {
 			store,
 		)
 		expect(withDelta.ok).toBe(true)
+
+		// EUR formatting & policy limit
+		const validEur = verifyMessageCitations(
+			"SEPA payout [src:REQ-3004] (€195.00) is below the €250.00 policy limit.",
+			store,
+			new Set([25000]),
+		)
+		expect(validEur.ok).toBe(true)
+
+		// Raw integer cents mislabeled as major USD/EUR units must be caught as INVENTED_PROSE_AMOUNT
+		const rawCentsUsd = verifyMessageCitations(
+			"Refund 31000 USD on [src:INV-1011] blocked.",
+			store,
+		)
+		expect(rawCentsUsd.ok).toBe(false)
+		expect(rawCentsUsd.code).toBe("INVENTED_PROSE_AMOUNT")
+	})
+
+	it("enforces EUR-only rail for propose_sepa_payout", () => {
+		const res = verifyToolProposal(
+			"propose_sepa_payout",
+			{
+				requestId: "REQ-3003",
+				invoiceId: "INV-1011",
+				vendorId: "VND-05",
+				amountCents: 31000,
+				targetIban: "NL91ABNA0417164300",
+				citations: [
+					{ sourceId: "INV-1011", field: "amountCents", expectedValue: 31000 },
+					{ sourceId: "REQ-3003", field: "amountCents", expectedValue: 31000 },
+				],
+			},
+			store,
+		)
+		expect(res.ok).toBe(false)
+		expect(res.code).toBe("SEPA_REQUIRES_EUR")
 	})
 })

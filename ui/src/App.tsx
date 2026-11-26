@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react"
-import { SourceDrawer } from "./components/SourceDrawer"
+import { SourceDrawer, type SepaXmlPreview } from "./components/SourceDrawer"
 import { SwimlaneChart } from "./components/SwimlaneChart"
 import type { SessionSnapshot, SourceInspectPayload } from "./types"
 
-function formatUsd(cents: number): string {
-	return `$${(cents / 100).toFixed(2)}`
+function formatMoney(cents: number, currency = "USD"): string {
+	const formatted = (cents / 100).toFixed(2)
+	if (currency === "EUR") return `€${formatted}`
+	if (currency === "USD") return `$${formatted}`
+	return `${currency} ${formatted}`
 }
 
 function statusBadgeClass(status: string): string {
@@ -33,6 +36,7 @@ export function App() {
 	const [trapKind, setTrapKind] = useState<string>("")
 	const [actionError, setActionError] = useState<string | null>(null)
 	const [selectedSource, setSelectedSource] = useState<SourceInspectPayload | null>(null)
+	const [selectedSepaXml, setSelectedSepaXml] = useState<SepaXmlPreview | null>(null)
 	const [sourceLoading, setSourceLoading] = useState(false)
 	const [sourceError, setSourceError] = useState<string | null>(null)
 
@@ -66,6 +70,7 @@ export function App() {
 	async function inspectSource(id: string) {
 		setSourceLoading(true)
 		setSourceError(null)
+		setSelectedSepaXml(null)
 		try {
 			const res = await fetch(`/api/source/${encodeURIComponent(id)}`)
 			const data = (await res.json()) as SourceInspectPayload & { error?: string }
@@ -73,6 +78,35 @@ export function App() {
 				setSourceError(data.error ?? `Source ${id} not found`)
 			} else {
 				setSelectedSource(data)
+			}
+		} catch (err) {
+			setSourceError(String(err))
+		} finally {
+			setSourceLoading(false)
+		}
+	}
+
+	async function inspectSepaXml(
+		invoiceId: string,
+		sepaDraft: { requestId: string; pain001MessageId: string; xmlSha256: string },
+	) {
+		setSourceLoading(true)
+		setSourceError(null)
+		setSelectedSource(null)
+		try {
+			const res = await fetch(`/api/sepa/${encodeURIComponent(invoiceId)}.xml?inline=1`)
+			if (!res.ok) {
+				const errJson = (await res.json().catch(() => ({}))) as { error?: string }
+				setSourceError(errJson.error ?? `Failed to load SEPA pain.001 XML for ${invoiceId}`)
+			} else {
+				const xml = await res.text()
+				setSelectedSepaXml({
+					invoiceId,
+					requestId: sepaDraft.requestId,
+					messageId: sepaDraft.pain001MessageId,
+					sha256: sepaDraft.xmlSha256,
+					xml,
+				})
 			}
 		} catch (err) {
 			setSourceError(String(err))
@@ -375,7 +409,7 @@ export function App() {
 					>
 						<div className="hitl-meta">
 							<h3>
-								ProofGate L3 Human Approval Required — {approval.requestId} ({formatUsd(approval.amountCents)})
+								ProofGate L3 Human Approval Required — {approval.requestId} ({formatMoney(approval.amountCents, approval.currency)})
 							</h3>
 							<p>{approval.reason}</p>
 							<div>
@@ -485,7 +519,8 @@ export function App() {
 												<span className={statusBadgeClass(record.status)}>{record.status}</span>
 											</td>
 											<td className="mono">
-												{formatUsd(record.paidAmountCents)} / {formatUsd(record.expectedAmountCents)}
+												{formatMoney(record.paidAmountCents, record.currency)} / {formatMoney(record.expectedAmountCents, record.currency)}{" "}
+												<span style={{ fontSize: 10, color: "var(--muted)" }}>{record.currency}</span>
 											</td>
 											<td>
 												{record.matchedTxIds.length > 0 ? (
@@ -510,8 +545,26 @@ export function App() {
 													</span>
 												))}
 												{record.sepaDraft && (
-													<div style={{ fontSize: 11, color: "#7dd3fc", marginTop: 2 }}>
-														SEPA {record.sepaDraft.requestId} ({record.sepaDraft.approvedBy})
+													<div style={{ fontSize: 11, color: "#7dd3fc", marginTop: 4 }}>
+														<div>
+															SEPA {record.sepaDraft.requestId} ({record.sepaDraft.approvedBy})
+														</div>
+														<div style={{ display: "flex", gap: 6, marginTop: 3, flexWrap: "wrap" }}>
+															<button
+																type="button"
+																className="src-pill mono"
+																onClick={() => void inspectSepaXml(invoiceId, record.sepaDraft!)}
+															>
+																Preview pain.001
+															</button>
+															<a
+																className="src-pill mono"
+																href={`/api/sepa/${encodeURIComponent(invoiceId)}.xml`}
+																download={`pain.001-${invoiceId}.xml`}
+															>
+																Download XML
+															</a>
+														</div>
 													</div>
 												)}
 												{record.drafts.map((d) => (
@@ -592,7 +645,7 @@ export function App() {
 								<div key={claim.claimId} className="item-box">
 									<div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 4 }}>
 										<strong>
-											{claim.producer} · {claim.kind} ({formatUsd(claim.amountCents)})
+											{claim.producer} · {claim.kind} ({formatMoney(claim.amountCents, claim.currency)})
 										</strong>
 										<span className={claim.auditStatus === "CONFIRMED" ? "badge badge-matched" : "badge badge-partial"}>
 											Audit: {claim.auditStatus}
@@ -620,6 +673,7 @@ export function App() {
 				<div className="right-col">
 					<SourceDrawer
 						selectedSource={selectedSource}
+						selectedSepaXml={selectedSepaXml}
 						loading={sourceLoading}
 						error={sourceError}
 						onInspectSource={(id) => void inspectSource(id)}

@@ -57,12 +57,14 @@ export function createReconcilerAgent(rt: LedgerRuntimeApi, modelName: string): 
 
 			if (args.matchKind === "ORPHAN_TX" && args.txId) {
 				state.unmatchedTxIds.add(args.txId)
+				const orphanTx = state.sourceStore.getTransaction(args.txId)
 				const claim: ClaimRecord = {
 					claimId: `CLM-ORPHAN-${args.txId}`,
 					txId: args.txId,
 					producer: "Reconciler",
 					kind: "ORPHAN_TX",
 					amountCents: args.amountCents,
+					currency: orphanTx?.currency,
 					summary: args.explanation,
 					citations: args.citations,
 					auditStatus: "PENDING",
@@ -124,6 +126,7 @@ export function createReconcilerAgent(rt: LedgerRuntimeApi, modelName: string): 
 				producer: "Reconciler",
 				kind: args.matchKind,
 				amountCents: casRes.value.paidAmountCents,
+				currency: inv.currency,
 				summary: args.explanation,
 				citations: args.citations,
 				auditStatus: "PENDING",
@@ -181,7 +184,7 @@ export function createReconcilerAgent(rt: LedgerRuntimeApi, modelName: string): 
 
 			const prompt = [
 				`[AGENT:Reconciler] [EVENT:match.ambiguous:${tx.sourceId}] [span:${spanId}]`,
-				`Investigate unmatched transaction ${tx.sourceId} (${tx.amountCents} ${tx.currency}, memo: "${tx.memo}").`,
+				`Investigate unmatched transaction ${tx.sourceId} (amountCents ${tx.amountCents}, currency ${tx.currency}, memo: "${tx.memo}").`,
 				`Use record_reconciliation ONLY if you can prove a split match, partial match, or orphan unmatched transaction with exact citations.`,
 				"```json",
 				JSON.stringify({
@@ -212,7 +215,7 @@ export function createReconcilerAgent(rt: LedgerRuntimeApi, modelName: string): 
 		instruction: [
 			"You are Reconciler, a concurrent financial reconciliation agent.",
 			"Rules:",
-			"1. All monetary amounts are integer amountCents (e.g. 120000 for $1,200.00). Never invent numbers or IDs.",
+			"1. All JSON monetary amounts are integer amountCents (e.g. 120000 USD = $1,200.00, 14500 EUR = €145.00). Never invent numbers or IDs, and NEVER label raw amountCents directly with USD/EUR (write '$1,200.00 (120000 cents)', not '120000 USD').",
 			"2. Only match transactions to an invoice if the exact sum of transaction amountCents equals the invoice amount (SPLIT_MATCH, even with memo typos like INV10O6 -> INV-1006) OR clearly references an invoice as a partial tranche (PARTIAL_MATCH).",
 			"3. Never match a transaction whose currency differs from the invoice or whose amount exceeds the invoice — reply without calling record_reconciliation and cite [src:ID].",
 			"4. If a single split transaction arrives before its counterpart, wait without calling record_reconciliation.",

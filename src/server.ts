@@ -199,6 +199,27 @@ export function createLedgerServer(
 				return
 			}
 
+			if (method === "GET" && path.startsWith("/api/sepa/") && path.endsWith(".xml")) {
+				const invoiceId = decodeURIComponent(path.slice("/api/sepa/".length, -".xml".length))
+				const artifact = controller.getSepaDraftXml(invoiceId)
+				if (!artifact) {
+					sendJson(res, 404, { ok: false, error: `No SEPA pain.001 XML draft found for "${invoiceId}"` })
+					return
+				}
+				const inline = url.searchParams.get("inline") === "1"
+				const headers: Record<string, string> = {
+					"Content-Type": "application/xml; charset=utf-8",
+					"X-LedgerProof-Sha256": artifact.sha256,
+					"X-LedgerProof-Message-Id": artifact.messageId,
+				}
+				if (!inline) {
+					headers["Content-Disposition"] = `attachment; filename="pain.001-${invoiceId}.xml"`
+				}
+				res.writeHead(200, headers)
+				res.end(artifact.xml)
+				return
+			}
+
 			if (path.startsWith("/api/")) {
 				sendJson(res, 404, { ok: false, error: "Not found" })
 				return

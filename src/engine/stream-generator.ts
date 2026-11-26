@@ -1,4 +1,5 @@
 import type { BankTransaction, Invoice, PaymentRequest, Vendor } from "../types"
+import { formatMoney } from "./currency"
 
 export type TrapKind =
 	| "split_typo"
@@ -185,12 +186,14 @@ export class ContinuousStreamGenerator {
 		const invId = this.nextInvId()
 		const txId = this.nextTxId()
 		const amountCents = this.variedCents(65, 240)
+		const includeSepa = this.rand() < 0.3
+		const currency = includeSepa ? "EUR" : "USD"
 		const inv: Invoice = {
 			sourceId: invId,
 			vendorId: vendor.sourceId,
 			poNumber: this.nextPo(),
 			amountCents,
-			currency: "USD",
+			currency,
 			issuedAt: "2026-11-26",
 			dueDate: "2026-12-05",
 			description: `Stream Black Friday order batch #${this.tickSeq}`,
@@ -201,24 +204,24 @@ export class ContinuousStreamGenerator {
 			reference: invId,
 			vendorId: vendor.sourceId,
 			amountCents,
-			currency: "USD",
+			currency,
 			bookedAt: "2026-11-26",
 			memo: `Auto-settled ${invId} ${vendor.name}`,
 			late: false,
 		}
 
 		const requests: PaymentRequest[] = []
-		if (this.rand() < 0.3) {
+		if (includeSepa) {
 			requests.push({
 				sourceId: this.nextReqId(),
 				kind: "sepa_payout",
 				invoiceId: invId,
 				vendorId: vendor.sourceId,
 				amountCents,
-				currency: "USD",
+				currency: "EUR",
 				targetIban: vendor.masterIban,
 				requestedBy: "ap-automation",
-				reason: "Routine Black Friday vendor payout within $250 limit",
+				reason: "Routine Black Friday SEPA vendor payout within €250 limit",
 				concurrentWithAlert: false,
 			})
 		}
@@ -226,7 +229,7 @@ export class ContinuousStreamGenerator {
 		return {
 			tickNumber: this.tickSeq,
 			trapKind: null,
-			label: `Clean settlement ${invId} ⇄ ${txId} ($${(amountCents / 100).toFixed(2)})`,
+			label: `Clean settlement ${invId} ⇄ ${txId} (${formatMoney(amountCents, currency)})`,
 			invoices: [inv],
 			transactions: [tx],
 			delayedTransactions: [],
@@ -431,7 +434,7 @@ export class ContinuousStreamGenerator {
 			vendorId: vendor.sourceId,
 			poNumber: this.nextPo(),
 			amountCents,
-			currency: "USD",
+			currency: "EUR",
 			issuedAt: "2026-11-26",
 			dueDate: "2026-12-01",
 			description: `High-value hardware batch (${invId})`,
@@ -442,7 +445,7 @@ export class ContinuousStreamGenerator {
 			reference: invId,
 			vendorId: vendor.sourceId,
 			amountCents,
-			currency: "USD",
+			currency: "EUR",
 			bookedAt: "2026-11-26",
 			memo: `Gateway capture ${invId}`,
 			late: false,
@@ -453,7 +456,7 @@ export class ContinuousStreamGenerator {
 			invoiceId: invId,
 			vendorId: vendor.sourceId,
 			amountCents,
-			currency: "USD",
+			currency: "EUR",
 			targetIban: spoofedIban,
 			requestedBy: `billing-override-${this.scenarioSeq}@vendor-update.invalid`,
 			reason: "Urgent Black Friday bank account override",
@@ -463,7 +466,7 @@ export class ContinuousStreamGenerator {
 		return {
 			tickNumber: this.tickSeq,
 			trapKind: "bec_iban_change",
-			label: `TRAP [BEC IBAN HITL]: ${reqId} on ${invId} ($${(amountCents / 100).toFixed(2)})`,
+			label: `TRAP [BEC IBAN HITL]: ${reqId} on ${invId} (${formatMoney(amountCents, "EUR")})`,
 			invoices: [inv],
 			transactions: [tx],
 			delayedTransactions: [],
@@ -633,7 +636,7 @@ export class ContinuousStreamGenerator {
 			vendorId: vendor.sourceId,
 			poNumber: this.nextPo(),
 			amountCents,
-			currency: "USD",
+			currency: "EUR",
 			issuedAt: "2026-11-26",
 			dueDate: "2026-12-04",
 			description: `Authorized Black Friday capacity upgrade (${invId})`,
@@ -644,7 +647,7 @@ export class ContinuousStreamGenerator {
 			reference: invId,
 			vendorId: vendor.sourceId,
 			amountCents,
-			currency: "USD",
+			currency: "EUR",
 			bookedAt: "2026-11-26",
 			memo: `Verified settlement ${invId} ${vendor.name}`,
 			late: false,
@@ -655,17 +658,17 @@ export class ContinuousStreamGenerator {
 			invoiceId: invId,
 			vendorId: vendor.sourceId,
 			amountCents,
-			currency: "USD",
+			currency: "EUR",
 			targetIban,
 			requestedBy: "cfo-approved@ledgerproof.internal",
-			reason: "Legitimate high-value SEPA payout (master IBAN verified, requires >$250 sign-off)",
+			reason: "Legitimate high-value SEPA payout (master IBAN verified, requires >€250 sign-off)",
 			concurrentWithAlert: false,
 		}
 
 		return {
 			tickNumber: this.tickSeq,
 			trapKind: "legit_high_value_sepa",
-			label: `BENIGN [Legit High-Value SEPA HITL]: ${reqId} on ${invId} ($${(amountCents / 100).toFixed(2)})`,
+			label: `BENIGN [Legit High-Value SEPA HITL]: ${reqId} on ${invId} (${formatMoney(amountCents, "EUR")})`,
 			invoices: [inv],
 			transactions: [tx],
 			delayedTransactions: [],

@@ -130,6 +130,17 @@ export function verifyToolProposal(
 			return { ok: false, code: "UNKNOWN_INVOICE", reason: `Unknown invoice ${args.invoiceId}` }
 		}
 
+		if (toolName === "propose_sepa_payout") {
+			const req = args.requestId ? sourceStore.getRequest(args.requestId) : undefined
+			if (inv.currency !== "EUR" || (req && req.currency !== "EUR")) {
+				return {
+					ok: false,
+					code: "SEPA_REQUIRES_EUR",
+					reason: `SEPA payout requires EUR currency (invoice ${inv.sourceId} is ${inv.currency}${req ? `, request ${req.sourceId} is ${req.currency}` : ""})`,
+				}
+			}
+		}
+
 		if (args.requestId) {
 			const req = sourceStore.getRequest(args.requestId)
 			if (!req) {
@@ -167,11 +178,12 @@ export function verifyToolProposal(
 	return { ok: true }
 }
 
-const DOLLAR_AMOUNT_RE = /\$([0-9][0-9,]*(?:\.[0-9]{1,2})?)/g
+const SYMBOL_AMOUNT_RE = /[$€]\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/g
+const CODE_AMOUNT_RE = /\b([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s*(USD|EUR)\b/gi
 const SOURCE_ANCHOR_RE = /\[src:([A-Z]+-\d+)\]/g
 
 /**
- * Checks final assistant prose: every monetary dollar figure in prose must be
+ * Checks final assistant prose: every monetary figure (symbol or currency-suffixed) in prose must be
  * accompanied by at least one valid [src:ID] anchor that exists in SourceStore,
  * and every cited [src:ID] must exist in SourceStore.
  */
@@ -193,16 +205,23 @@ export function verifyMessageCitations(
 		anchors.push(id)
 	}
 
-	const dollarMatches = [...text.matchAll(DOLLAR_AMOUNT_RE)]
-	if (dollarMatches.length > 0 && anchors.length === 0) {
+	const monetaryMatches: Array<{ raw: string; numberPart: string }> = []
+	for (const match of text.matchAll(SYMBOL_AMOUNT_RE)) {
+		monetaryMatches.push({ raw: match[0], numberPart: match[1] })
+	}
+	for (const match of text.matchAll(CODE_AMOUNT_RE)) {
+		monetaryMatches.push({ raw: match[0], numberPart: match[1] })
+	}
+
+	if (monetaryMatches.length > 0 && anchors.length === 0) {
 		return {
 			ok: false,
 			code: "UNCITED_MONETARY_FIGURE",
-			reason: `Message reports monetary amount ($${dollarMatches[0][1]}) without any [src:ID] source citation.`,
+			reason: `Message reports monetary amount (${monetaryMatches[0].raw}) without any [src:ID] source citation.`,
 		}
 	}
 
-	// Check each dollar amount appears on at least one cited entity (or sum/delta of unique cited transactions)
+	// Check each monetary amount appears on at least one cited entity (or sum/delta of unique cited transactions)
 	const uniqueAnchors = [...new Set(anchors)]
 	const citedAmounts = new Set<number>(allowedPolicyAmounts)
 	let sumOfCitedTx = 0
@@ -227,14 +246,14 @@ export function verifyMessageCitations(
 		citedAmounts.add(sumOfCitedTx)
 	}
 
-	for (const match of dollarMatches) {
-		const normalized = match[1].replace(/,/g, "")
+	for (const match of monetaryMatches) {
+		const normalized = match.numberPart.replace(/,/g, "")
 		const cents = Math.round(Number.parseFloat(normalized) * 100)
 		if (!citedAmounts.has(cents)) {
 			return {
 				ok: false,
 				code: "INVENTED_PROSE_AMOUNT",
-				reason: `Dollar figure $${match[1]} (${cents} cents) is not backed by cited sources [${anchors.join(", ")}].`,
+				reason: `Monetary figure ${match.raw} (${cents} cents) is not backed by cited sources [${anchors.join(", ")}].`,
 			}
 		}
 	}

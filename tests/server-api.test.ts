@@ -108,5 +108,19 @@ describe("HTTP & SSE Server API interactive flow", () => {
 		const lines = jsonlText.trim().split("\n")
 		expect(lines.length).toBeGreaterThan(5)
 		expect(() => JSON.parse(lines[0])).not.toThrow()
+
+		// Check ISO 20022 SEPA pain.001 XML endpoint
+		const xmlRes = await fetch(`${baseUrl}/api/sepa/INV-1012.xml`)
+		expect(xmlRes.status).toBe(200)
+		expect(xmlRes.headers.get("content-type")).toContain("application/xml")
+		expect(xmlRes.headers.get("x-ledgerproof-sha256")).toBeTruthy()
+		const xmlBody = await xmlRes.text()
+		expect(xmlBody).toContain("urn:iso:std:iso:20022:tech:xsd:pain.001.001.09")
+		expect(xmlBody).toContain("SYNTHETIC TEST DATA")
+		expect(xmlBody).toContain('Ccy="EUR">195.00<')
+		expect(xmlBody).toContain("CZ6508000000192000145399")
+
+		const missingXmlRes = await fetch(`${baseUrl}/api/sepa/INV-1009.xml`)
+		expect(missingXmlRes.status).toBe(404)
 	})
 })

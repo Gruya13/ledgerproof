@@ -12,7 +12,9 @@ import {
 	type Tool,
 } from "@mozaik-ai/core"
 import type { LedgerRuntimeApi } from "../runtime"
-import { ProofGateInterceptionHandler } from "../interception/proof-gate"
+import { formatMoney } from "../engine/currency"
+import { generateSepaPain001Draft } from "../engine/sepa-xml"
+import { normalizeIban, ProofGateInterceptionHandler } from "../interception/proof-gate"
 import { CITATION_ARRAY_SCHEMA } from "./schemas"
 import type { Citation, ClaimRecord, PaymentRequest } from "../types"
 
@@ -61,9 +63,24 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 			const cell = state.getCell(args.invoiceId)
 			if (!cell) return { ok: false, reason: "Unknown invoice" }
 
+			const inv = state.sourceStore.getInvoice(args.invoiceId)
+			const req = state.sourceStore.getRequest(args.requestId)
+			const vendor = state.sourceStore.getVendor(args.vendorId)
+			if (!inv || !req || !vendor) {
+				return { ok: false, reason: "Missing invoice, request, or vendor source record for SEPA XML generation" }
+			}
+
 			const snap = cell.read()
 			const approvedBy = args.amountCents > state.spendingLimitCents ? "HUMAN" : "AUTO_POLICY"
 			const casVersion = approvedBy === "HUMAN" ? snap.version : (args.expectedVersion ?? snap.version)
+			const normalizedIban = normalizeIban(args.targetIban)
+			const artifact = generateSepaPain001Draft({
+				invoice: inv,
+				vendor,
+				request: { ...req, targetIban: normalizedIban },
+				approvedBy,
+				cellVersion: casVersion + 1,
+			})
 
 			const casRes = cell.casWrite(casVersion, (cur) => ({
 				...cur,
@@ -71,10 +88,16 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 				sepaDraft: {
 					requestId: args.requestId,
 					amountCents: args.amountCents,
-					targetIban: args.targetIban,
+					currency: inv.currency,
+					targetIban: normalizedIban,
 					approvedBy,
+					pain001MessageId: artifact.messageId,
+					xmlSha256: artifact.sha256,
 				},
-				notes: [...cur.notes, `SEPA draft ${args.requestId} ready (${approvedBy})`],
+				notes: [
+					...cur.notes,
+					`SEPA pain.001 draft ${args.requestId} (${formatMoney(args.amountCents, inv.currency)}, ${approvedBy}, msgId=${artifact.messageId})`,
+				],
 			}))
 
 			if (!casRes.ok) {
@@ -82,13 +105,23 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 				return { ok: false, reason: "cas.rejected", currentVersion: casRes.currentVersion }
 			}
 
+			state.setSepaDraftXml(artifact)
+			state.logAudit("sepa.pain001_generated", "PayoutAndRefund", args.invoiceId, {
+				requestId: args.requestId,
+				messageId: artifact.messageId,
+				xmlSha256: artifact.sha256,
+				currency: inv.currency,
+				amountCents: args.amountCents,
+			})
+
 			const claim: ClaimRecord = {
 				claimId: `CLM-${args.requestId}`,
 				invoiceId: args.invoiceId,
 				producer: "PayoutAndRefund",
 				kind: "SEPA_DRAFT",
 				amountCents: args.amountCents,
-				summary: `SEPA payout draft ${args.requestId} ready for ${args.invoiceId} (${approvedBy})`,
+				currency: inv.currency,
+				summary: `SEPA pain.001 draft ${args.requestId} ready for ${args.invoiceId} (${formatMoney(args.amountCents, inv.currency)}, ${approvedBy})`,
 				citations: args.citations,
 				auditStatus: "PENDING",
 				createdAt: new Date().toISOString(),
@@ -96,7 +129,13 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 			state.addClaim(claim)
 			rt.sendEvent(SemanticEvent.create("claim.proposed", selfId, { claim }), selfId)
 
-			return { ok: true, status: "SEPA_DRAFT_READY", approvedBy }
+			return {
+				ok: true,
+				status: "SEPA_DRAFT_READY",
+				approvedBy,
+				pain001MessageId: artifact.messageId,
+				xmlSha256: artifact.sha256,
+			}
 		},
 	}
 
@@ -143,12 +182,14 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 				state.metrics.casConflictsPrevented += 1
 				return { ok: false, reason: "cas.rejected" }
 			}
+			const invCurrency = state.sourceStore.getInvoice(args.invoiceId)?.currency ?? snap.value.currency
 			const claim: ClaimRecord = {
 				claimId: `CLM-${args.requestId}`,
 				invoiceId: args.invoiceId,
 				producer: "PayoutAndRefund",
 				kind: "REFUND",
 				amountCents: args.amountCents,
+				currency: invCurrency,
 				summary: args.reason ?? `Refund ${args.requestId}`,
 				citations: args.citations,
 				auditStatus: "PENDING",
@@ -187,6 +228,7 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 			const cell = state.getCell(args.invoiceId)
 			if (!cell) return { ok: false, reason: "Unknown invoice" }
 			const snap = cell.read()
+			const invCurrency = state.sourceStore.getInvoice(args.invoiceId)?.currency ?? snap.value.currency
 			const casRes = cell.casWrite(snap.version, (cur) => ({
 				...cur,
 				drafts: [
@@ -202,7 +244,7 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 						citations: args.citations,
 					},
 				],
-				notes: [...cur.notes, `Overdue chase draft prepared for $${(args.amountCents / 100).toFixed(2)}`],
+				notes: [...cur.notes, `Overdue chase draft prepared for ${formatMoney(args.amountCents, invCurrency)}`],
 			}))
 			if (!casRes.ok) return { ok: false, reason: "cas.rejected" }
 			const claim: ClaimRecord = {
@@ -211,6 +253,7 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 				producer: "PayoutAndRefund",
 				kind: "CHASE_DRAFT",
 				amountCents: args.amountCents,
+				currency: invCurrency,
 				summary: args.reason ?? `Overdue chase draft for ${args.invoiceId}`,
 				citations: args.citations,
 				auditStatus: "PENDING",
@@ -307,11 +350,12 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 		instruction: [
 			"You are PayoutAndRefund, a controlled payment agent.",
 			"Rules:",
-			"1. On request.arrived with kind='sepa_payout', call propose_sepa_payout with exact amountCents, targetIban, expectedVersion, and citations for the request and invoice.",
-			"2. On request.arrived with kind='refund', call propose_refund with exact amountCents, expectedVersion, and citations for the request and invoice.",
-			"3. On invoice.partial, call draft_overdue_chase using remainingCents as amountCents, expectedVersion as basedOnVersion, and cite the invoice amountCents.",
-			"4. On claim.staled, do NOT call any tool — simply confirm chase draft cancellation citing [src:<invoiceId>].",
-			"5. Never invent amounts. In your final text reply, include [src:ID] tags for every invoice/request/amount mentioned.",
+			"1. All JSON amounts are integer cents (e.g. 23900 EUR = €239.00, 64725 USD = $647.25). NEVER write raw amountCents directly before USD or EUR (never '64725 USD' or '23900 EUR'); write '$647.25 (64725 cents)' or '€239.00 (23900 cents)'. SEPA payouts are EUR-only.",
+			"2. On request.arrived with kind='sepa_payout', call propose_sepa_payout with exact amountCents, targetIban, expectedVersion, and citations for the request and invoice.",
+			"3. On request.arrived with kind='refund', call propose_refund with exact amountCents, expectedVersion, and citations for the request and invoice.",
+			"4. On invoice.partial, call draft_overdue_chase using remainingCents as amountCents, expectedVersion as basedOnVersion, and cite the invoice amountCents.",
+			"5. On claim.staled, do NOT call any tool — simply confirm chase draft cancellation citing [src:<invoiceId>].",
+			"6. Never invent amounts. In your final text reply, include [src:ID] tags for every invoice/request/amount mentioned.",
 		].join("\n"),
 		tools: [proposeSepaPayoutTool, proposeRefundTool, draftOverdueChaseTool],
 		handlers: [handler],

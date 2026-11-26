@@ -8,6 +8,7 @@ import {
 	type InferenceOutput,
 	type InferenceRunner,
 } from "@mozaik-ai/core"
+import { formatMoney } from "./currency"
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms))
@@ -378,6 +379,7 @@ export class MockInferenceRunner implements InferenceRunner {
 
 		// SEPA Payout drafts (auto-approve within limit or BEC IBAN human review)
 		if (req?.kind === "sepa_payout") {
+			const currency = String(req.currency ?? "EUR")
 			if (previousCalls.length === 0) {
 				return [
 					FunctionCallItem.rehydrate({
@@ -403,8 +405,8 @@ export class MockInferenceRunner implements InferenceRunner {
 			return [
 				ModelMessageItem.rehydrate({
 					text: blocked
-						? `SEPA payout [src:${req.sourceId}] for [src:${req.invoiceId}] ($${(Number(req.amountCents) / 100).toFixed(2)}) blocked/held by ProofGate.`
-						: `SEPA payout draft [src:${req.sourceId}] for [src:${req.invoiceId}] ($${(Number(req.amountCents) / 100).toFixed(2)}) prepared.`,
+						? `SEPA payout [src:${req.sourceId}] for [src:${req.invoiceId}] (${formatMoney(Number(req.amountCents), currency)}) blocked/held by ProofGate.`
+						: `SEPA payout draft [src:${req.sourceId}] for [src:${req.invoiceId}] (${formatMoney(Number(req.amountCents), currency)}) prepared.`,
 				}),
 			]
 		}
@@ -557,9 +559,10 @@ export class MockInferenceRunner implements InferenceRunner {
 			]
 		}
 		if (req && vendor) {
+			const currency = String(req.currency ?? "EUR")
 			return [
 				ModelMessageItem.rehydrate({
-					text: `Flagged BEC IBAN mismatch on [src:${req.sourceId}] vs master [src:${vendor.sourceId}] for [src:${req.invoiceId}] ($${(Number(req.amountCents) / 100).toFixed(2)}).`,
+					text: `Flagged BEC IBAN mismatch on [src:${req.sourceId}] vs master [src:${vendor.sourceId}] for [src:${req.invoiceId}] (${formatMoney(Number(req.amountCents), currency)}).`,
 				}),
 			]
 		}

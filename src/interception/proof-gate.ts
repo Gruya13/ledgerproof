@@ -8,6 +8,7 @@ import {
 	type InterceptionHandler,
 } from "@mozaik-ai/core"
 import type { LedgerRuntimeApi } from "../runtime"
+import { formatMoney } from "../engine/currency"
 import { verifyMessageCitations, verifyToolProposal, type ToolProposalArgs } from "../engine/proof-verifier"
 import type { PendingApproval, RiskFlag } from "../types"
 
@@ -200,15 +201,16 @@ export class ProofGateInterceptionHandler implements InterceptionHandler {
 					flags.push("BEC_IBAN_CHANGE")
 				}
 
+				const currency = req?.currency ?? snap.value.currency
 				const reasons: string[] = []
 				if (overLimit && !ibanMismatch && flags.length === 0) {
 					reasons.push(
-						`Amount $${((args.amountCents ?? 0) / 100).toFixed(2)} exceeds auto-approve limit $${(state.spendingLimitCents / 100).toFixed(2)} (IBAN verified / no fraud flags — safe to approve if authorized)`,
+						`Amount ${formatMoney(args.amountCents ?? 0, currency)} exceeds auto-approve limit ${formatMoney(state.spendingLimitCents, currency)} (IBAN verified / no fraud flags — safe to approve if authorized)`,
 					)
 				} else {
 					if (overLimit) {
 						reasons.push(
-							`Amount $${((args.amountCents ?? 0) / 100).toFixed(2)} exceeds auto-approve limit $${(state.spendingLimitCents / 100).toFixed(2)}`,
+							`Amount ${formatMoney(args.amountCents ?? 0, currency)} exceeds auto-approve limit ${formatMoney(state.spendingLimitCents, currency)}`,
 						)
 					}
 					if (ibanMismatch) {
@@ -225,6 +227,7 @@ export class ProofGateInterceptionHandler implements InterceptionHandler {
 					agentName: this.agentName,
 					actionName: call.name,
 					amountCents: args.amountCents ?? 0,
+					currency,
 					reason: reasons.join("; "),
 					riskFlags: flags,
 					citations: args.citations ?? [],

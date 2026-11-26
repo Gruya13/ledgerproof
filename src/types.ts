@@ -116,8 +116,11 @@ export interface LedgerRecord {
 	sepaDraft?: {
 		requestId: string
 		amountCents: number
+		currency: string
 		targetIban: string
 		approvedBy: "AUTO_POLICY" | "HUMAN"
+		pain001MessageId: string
+		xmlSha256: string
 	}
 	drafts: PendingDraft[]
 	notes: string[]
@@ -130,6 +133,7 @@ export interface ClaimRecord {
 	producer: string
 	kind: "EXACT_MATCH" | "SPLIT_MATCH" | "PARTIAL_MATCH" | "ORPHAN_TX" | "RISK_FLAG" | "SEPA_DRAFT" | "REFUND" | "CHASE_DRAFT"
 	amountCents: number
+	currency?: string
 	summary: string
 	citations: Citation[]
 	auditStatus: "PENDING" | "CONFIRMED" | "REFUTED" | "NEEDS_HUMAN"
@@ -155,6 +159,7 @@ export interface PendingApproval {
 	agentName: string
 	actionName: string
 	amountCents: number
+	currency?: string
 	reason: string
 	riskFlags: RiskFlag[]
 	citations: Citation[]

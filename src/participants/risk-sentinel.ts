@@ -82,12 +82,14 @@ export function createRiskSentinelAgent(rt: LedgerRuntimeApi, modelName: string)
 				}))
 			}
 
+			const invRecord = state.sourceStore.getInvoice(args.invoiceId)
 			const claim: ClaimRecord = {
 				claimId: `CLM-RISK-${args.invoiceId}-${args.riskFlag}`,
 				invoiceId: args.invoiceId,
 				producer: "RiskSentinel",
 				kind: "RISK_FLAG",
-				amountCents: state.sourceStore.getInvoice(args.invoiceId)?.amountCents ?? 0,
+				amountCents: invRecord?.amountCents ?? 0,
+				currency: invRecord?.currency,
 				summary: args.reason,
 				citations: args.citations,
 				auditStatus: "PENDING",
@@ -234,7 +236,7 @@ export function createRiskSentinelAgent(rt: LedgerRuntimeApi, modelName: string)
 			"3. Fraud alert transaction (kind='fraud_alert'): call flag_risk with riskFlag='FRAUD_VELOCITY', severity='CRITICAL', citing transaction.amountCents and invoice.amountCents.",
 			"4. Currency mismatch (payload.currencyMismatch): call flag_risk with riskFlag='CURRENCY_MISMATCH', severity='HIGH', citing invoice.currency, transaction.currency, and invoice.amountCents.",
 			"5. Overpayment anomaly (payload.overpayment): call flag_risk with riskFlag='OVERPAYMENT_ANOMALY', severity='HIGH', citing invoice.amountCents and transaction.amountCents.",
-			"6. In your final text reply, include [src:ID] tags for every invoice/transaction/request/vendor and dollar amount mentioned.",
+			"6. All JSON amounts are integer cents — NEVER label raw amountCents as USD/EUR (write '$647.25 (64725 cents)' or '€195.00 (19500 cents)'). In your final text reply, include [src:ID] tags for every invoice/transaction/request/vendor and monetary amount mentioned.",
 		].join("\n"),
 		tools: [flagRiskTool],
 		handlers: [handler],
