@@ -1,3 +1,10 @@
+import {
+	c,
+	renderBanner,
+	renderGanttTimeline,
+	renderKpiGrid,
+	renderSection,
+} from "./engine/cli-ui"
 import { loadGroundTruth, runBlackFridayScenario } from "./runner-setup"
 import type { GroundTruthSpec } from "./types"
 import type { LedgerState } from "./runtime"
@@ -93,40 +100,54 @@ async function main(): Promise<void> {
 	const evaluation = evaluateAgainstGroundTruth(state, gt)
 	const m = state.metrics
 
-	console.log("============================================================")
-	console.log("  LedgerProof — Automated Concurrency & Evidence Proof")
-	console.log("  100% Synthetic Data | Not Financial Advice")
-	console.log("============================================================")
-	console.log(`Ground-truth invoices : ${evaluation.casesPassed}/${evaluation.casesTotal}`)
-	console.log(`Peak concurrent loops : ${m.peakConcurrentLoops} (min ${gt.requiredMetrics.minPeakConcurrentLoops})`)
-	console.log(`Total loops completed : ${m.totalLoopsFinished}/${m.totalLoopsStarted}`)
-	console.log(`Deterministic matches : ${m.deterministicMatches} (0 LLM tokens)`)
-	console.log(`CAS conflicts stopped : ${m.casConflictsPrevented}`)
-	console.log(`Uncited/fake blocked  : ${m.uncitedNumbersBlocked}`)
-	console.log(`Invented nums leaked  : ${m.inventedNumbersLeaked}`)
-	console.log(`Stale invalidations   : ${m.staleInvalidations}`)
-	console.log(`Human HITL routed     : ${m.humanApprovalsRouted}`)
-	console.log("------------------------------------------------------------")
+	console.log(
+		renderBanner({
+			title: "Automated Concurrency & Evidence Proof",
+			subtitle: "Zero-Key MockInferenceRunner · 7 Planted Black Friday Scenarios",
+			badges: ["@mozaik-ai/core@6.0.0", "L1+L2+L3 ProofGate", "Palimpsest STALE"],
+		}),
+	)
 
-	const baseMs = m.spans[0]?.startMs ?? 0
-	console.log("Concurrent Agent Execution Timeline (relative ms):")
-	for (const span of m.spans) {
-		const start = span.startMs - baseMs
-		const end = (span.endMs ?? span.startMs) - baseMs
-		console.log(`  +${String(start).padStart(4)}ms -> +${String(end).padStart(4)}ms | ${span.agentName.padEnd(16)} | ${span.eventType} (${span.targetId})`)
-	}
-	console.log("------------------------------------------------------------")
+	console.log(renderSection("VERIFICATION KPI SUMMARY"))
+	console.log(
+		renderKpiGrid(
+			[
+				{
+					label: "Ground-Truth Invoices",
+					value: `${evaluation.casesPassed}/${evaluation.casesTotal}`,
+					tone: evaluation.casesPassed === evaluation.casesTotal ? "green" : "red",
+				},
+				{ label: "Peak Concurrent Loops", value: `${m.peakConcurrentLoops} (min ${gt.requiredMetrics.minPeakConcurrentLoops})`, tone: "cyan" },
+				{ label: "Loops Completed", value: `${m.totalLoopsFinished}/${m.totalLoopsStarted}`, tone: "green" },
+				{ label: "0-Token Matches", value: `${m.deterministicMatches}`, tone: "green" },
+				{ label: "L2 CAS Stopped", value: `${m.casConflictsPrevented}`, tone: "amber" },
+				{ label: "L1 Blocked / Leaked", value: `${m.uncitedNumbersBlocked} / ${m.inventedNumbersLeaked}`, tone: "red" },
+				{ label: "Palimpsest STALE", value: `${m.staleInvalidations}`, tone: "purple" },
+				{ label: "L3 HITL Routed", value: `${m.humanApprovalsRouted}`, tone: "amber" },
+				{
+					label: "Orphan TXs Held",
+					value: `${state.unmatchedTxIds.size}`,
+					tone: "neutral",
+				},
+			],
+			3,
+		),
+	)
+
+	console.log(renderSection("CONCURRENT AGENT EXECUTION TIMELINE", `${m.spans.length} spans`))
+	console.log(renderGanttTimeline(m.spans, m.peakConcurrentLoops))
+	console.log("")
 
 	if (!evaluation.passed) {
-		console.error("PROOF FAILED:")
+		console.error(c.red("✖ PROOF FAILED:"))
 		for (const f of evaluation.failures) {
-			console.error(`  - ${f}`)
+			console.error(`  ${c.red("•")} ${f}`)
 		}
 		process.exitCode = 1
 		return
 	}
 
-	console.log("PROOF PASSED: All 7 planted Black Friday finance scenarios & concurrency invariants verified.")
+	console.log(c.green("✔ PROOF PASSED: All 7 planted Black Friday finance scenarios & concurrency invariants verified."))
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

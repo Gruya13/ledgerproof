@@ -1,6 +1,16 @@
 import { mkdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { createInterface } from "node:readline/promises"
+import {
+	c,
+	formatStreamLog,
+	renderBanner,
+	renderHitlBox,
+	renderKpiGrid,
+	renderLedgerTable,
+	renderRejectedClaims,
+	renderSection,
+} from "./engine/cli-ui"
 import { runBlackFridayScenario } from "./runner-setup"
 import { SessionController } from "./session-controller"
 
@@ -23,18 +33,20 @@ async function interactiveApprovalPrompt(question: string): Promise<boolean> {
 }
 
 async function runContinuousCliDemo(maxTicks: number): Promise<void> {
-	console.log("============================================================")
-	console.log(`  LedgerProof — Continuous Chaos Stream CLI (${maxTicks} ticks)`)
-	console.log("  Mode: Offline MockInferenceRunner (0 API keys required)")
-	console.log("  Disclaimer: Synthetic data only. Not financial advice.")
-	console.log("============================================================\n")
+	console.log(
+		renderBanner({
+			title: `Continuous Chaos Stream CLI (${maxTicks} ticks)`,
+			subtitle: "Randomized Synthetic Black Friday Stream · Trap & Benign Injector",
+			badges: ["MockInferenceRunner", "0 API Keys", `Ticks: ${maxTicks}`],
+		}),
+	)
 
 	const controller = new SessionController()
 	let seenLogs = 0
 	const unsub = controller.subscribe(() => {
 		const snap = controller.getSnapshot()
 		while (seenLogs < snap.logs.length) {
-			console.log(snap.logs[seenLogs].text)
+			console.log(formatStreamLog(snap.logs[seenLogs].text))
 			seenLogs += 1
 		}
 	})
@@ -62,24 +74,22 @@ async function runContinuousCliDemo(maxTicks: number): Promise<void> {
 	await controller.waitForCurrentIdle(10000)
 	unsub()
 
-	const finalSnap = controller.getSnapshot()
-	console.log("\n=== CONTINUOUS STREAM SUMMARY ===")
+	const finalSnap = controller.getSnapshot({ full: true })
+	console.log(renderSection("CONTINUOUS STREAM SUMMARY", `seed ${finalSnap.stream.seed ?? "n/a"}`))
 	console.log(
-		JSON.stringify(
-			{
-				ticks: finalSnap.stream.tickCount,
-				trapsInjected: finalSnap.stream.trapsInjected,
-				totalInvoices: finalSnap.totalCellsCount,
-				peakConcurrentLoops: finalSnap.metrics.peakConcurrentLoops,
-				deterministicMatches: finalSnap.metrics.deterministicMatches,
-				casConflictsPrevented: finalSnap.metrics.casConflictsPrevented,
-				uncitedNumbersBlocked: finalSnap.metrics.uncitedNumbersBlocked,
-				inventedNumbersLeaked: finalSnap.metrics.inventedNumbersLeaked,
-				staleInvalidations: finalSnap.metrics.staleInvalidations,
-				humanApprovalsRouted: finalSnap.metrics.humanApprovalsRouted,
-			},
-			null,
-			2,
+		renderKpiGrid(
+			[
+				{ label: "Ticks / Traps", value: `${finalSnap.stream.tickCount} / ${finalSnap.stream.trapsInjected}`, tone: "cyan" },
+				{ label: "Ledger Invoices", value: `${finalSnap.totalCellsCount}`, tone: "green" },
+				{ label: "Peak Concurrent", value: `${finalSnap.metrics.peakConcurrentLoops}`, tone: "cyan" },
+				{ label: "0-Token Matches", value: `${finalSnap.metrics.deterministicMatches}`, tone: "green" },
+				{ label: "CAS Stopped", value: `${finalSnap.metrics.casConflictsPrevented}`, tone: "amber" },
+				{ label: "L1 / Leaked", value: `${finalSnap.metrics.uncitedNumbersBlocked} / ${finalSnap.metrics.inventedNumbersLeaked}`, tone: "red" },
+				{ label: "STALE Invalidations", value: `${finalSnap.metrics.staleInvalidations}`, tone: "purple" },
+				{ label: "HITL Routed", value: `${finalSnap.metrics.humanApprovalsRouted}`, tone: "amber" },
+				{ label: "Loops Done", value: `${finalSnap.metrics.totalLoopsFinished}/${finalSnap.metrics.totalLoopsStarted}`, tone: "green" },
+			],
+			3,
 		),
 	)
 }
@@ -95,23 +105,21 @@ async function main(): Promise<void> {
 
 	const autoMode = process.argv.includes("--auto") || !process.stdin.isTTY
 
-	console.log("============================================================")
-	console.log("  LedgerProof — Evidence-First Black Friday Finance Agents")
-	console.log("  Mode: Offline MockInferenceRunner (0 API keys required)")
-	console.log("  Disclaimer: Synthetic data only. Not financial advice.")
-	console.log("============================================================\n")
+	console.log(
+		renderBanner({
+			title: "Evidence-First Black Friday Finance Agents",
+			subtitle: "Concurrent Mozaik Multi-Agent Reconciliation, Risk & Controlled SEPA Payouts",
+			badges: ["MockInferenceRunner", "0 API Keys", autoMode ? "Auto Mode" : "Interactive TTY"],
+		}),
+	)
 
 	const state = await runBlackFridayScenario({
-		log: (line) => console.log(line),
+		log: (line) => console.log(formatStreamLog(line)),
 		approvalHandler: async (approval) => {
-			console.log("\n--- HUMAN APPROVAL REQUIRED (other Mozaik loops continue) ---")
-			console.log(`  Request : ${approval.requestId} (${approval.actionName})`)
-			console.log(`  Invoice : ${approval.invoiceId} | Amount: $${(approval.amountCents / 100).toFixed(2)}`)
-			console.log(`  Reason  : ${approval.reason}`)
-			console.log(`  Flags   : ${approval.riskFlags.join(", ") || "none"}`)
+			console.log(`\n${renderHitlBox(approval)}`)
 
 			if (autoMode) {
-				console.log("  [--auto] Rejecting suspicious IBAN change / high-risk payout.\n")
+				console.log(c.amber("  [--auto] Rejecting suspicious IBAN change / high-risk payout.\n"))
 				return {
 					approved: false,
 					reason: `Auto-demo rejected ${approval.requestId}: ${approval.reason}`,
@@ -128,38 +136,28 @@ async function main(): Promise<void> {
 		},
 	})
 
-	console.log("\n=== FINAL VERIFIED LEDGER ===")
-	for (const [id, cell] of state.cells.entries()) {
+	console.log(renderSection("FINAL VERIFIED LEDGER", `${state.cells.size} invoices`))
+	const ledgerRows = [...state.cells.entries()].map(([invoiceId, cell]) => {
 		const snap = cell.read()
-		const rec = snap.value
-		const txs = rec.matchedTxIds.join(", ") || "-"
-		const flags = rec.riskFlags.join(", ") || "-"
-		const staled = rec.drafts.filter((d) => d.status === "STALE").length
-		console.log(
-			`${id} (v${snap.version}) | ${rec.status.padEnd(16)} | $${(rec.paidAmountCents / 100).toFixed(2).padStart(7)} / $${(rec.expectedAmountCents / 100).toFixed(2).padStart(7)} | tx:[${txs}] | flags:[${flags}] | staleDrafts:${staled}`,
-		)
-	}
+		return { invoiceId, version: snap.version, record: snap.value }
+	})
+	console.log(renderLedgerTable(ledgerRows))
 
-	console.log("\n=== BLOCKED / REJECTED CLAIMS (CodeProof Audit Trail) ===")
-	for (const rej of state.rejectedAttempts) {
-		console.log(`- [${rej.id}] (${rej.level} / ${rej.code}) ${rej.agentName}.${rej.actionName}: ${rej.reason}`)
-	}
+	console.log(renderSection("BLOCKED / REJECTED CLAIMS", "ProofGate L1/L2/L3 Audit"))
+	console.log(renderRejectedClaims(state.rejectedAttempts))
 
-	console.log("\n=== CONCURRENCY & EVIDENCE METRICS ===")
+	console.log(renderSection("CONCURRENCY & EVIDENCE METRICS"))
 	console.log(
-		JSON.stringify(
-			{
-				peakConcurrentLoops: state.metrics.peakConcurrentLoops,
-				totalLoopsCompleted: `${state.metrics.totalLoopsFinished}/${state.metrics.totalLoopsStarted}`,
-				deterministicMatches: state.metrics.deterministicMatches,
-				casConflictsPrevented: state.metrics.casConflictsPrevented,
-				uncitedNumbersBlocked: state.metrics.uncitedNumbersBlocked,
-				inventedNumbersLeaked: state.metrics.inventedNumbersLeaked,
-				staleInvalidations: state.metrics.staleInvalidations,
-				humanApprovalsRouted: state.metrics.humanApprovalsRouted,
-			},
-			null,
-			2,
+		renderKpiGrid(
+			[
+				{ label: "Peak Concurrent Loops", value: `${state.metrics.peakConcurrentLoops}`, tone: "cyan" },
+				{ label: "Loops Completed", value: `${state.metrics.totalLoopsFinished}/${state.metrics.totalLoopsStarted}`, tone: "green" },
+				{ label: "0-Token Matches", value: `${state.metrics.deterministicMatches}`, tone: "green" },
+				{ label: "L2 CAS Stopped", value: `${state.metrics.casConflictsPrevented}`, tone: "amber" },
+				{ label: "L1 Blocked / Leaked", value: `${state.metrics.uncitedNumbersBlocked} / ${state.metrics.inventedNumbersLeaked}`, tone: "red" },
+				{ label: "STALE Invalidations", value: `${state.metrics.staleInvalidations}`, tone: "purple" },
+			],
+			3,
 		),
 	)
 
@@ -167,7 +165,7 @@ async function main(): Promise<void> {
 	mkdirSync(outDir, { recursive: true })
 	const jsonl = state.auditLog.map((entry) => JSON.stringify(entry)).join("\n") + "\n"
 	writeFileSync(resolve(outDir, "audit-trace.jsonl"), jsonl, "utf8")
-	console.log(`\nAudit trace exported to out/audit-trace.jsonl (${state.auditLog.length} entries).`)
+	console.log(`\n${c.green("✔")} Audit trace exported to ${c.cyan("out/audit-trace.jsonl")} ${c.dim(`(${state.auditLog.length} entries)`)}.`)
 }
 
 main().catch((err) => {

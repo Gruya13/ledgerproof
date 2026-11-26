@@ -1,6 +1,16 @@
 import "dotenv/config"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
+import {
+	c,
+	formatStreamLog,
+	renderBanner,
+	renderHitlBox,
+	renderKpiGrid,
+	renderLedgerTable,
+	renderRejectedClaims,
+	renderSection,
+} from "./engine/cli-ui"
 import { resolveLiveProviderFromEnv } from "./engine/provider-factory"
 import { evaluateAgainstGroundTruth } from "./proof"
 import { loadGroundTruth, runBlackFridayScenario } from "./runner-setup"
@@ -22,11 +32,13 @@ async function runLiveContinuousStream(
 	maxTicks: number,
 	maxLlmCalls: number,
 ): Promise<void> {
-	console.log("============================================================")
-	console.log(`  LedgerProof — LIVE Randomized Chaos Stream (${maxTicks} ticks)`)
-	console.log(`  Engine: ${providerLabel} | Max LLM Budget: ${maxLlmCalls} calls`)
-	console.log("  100% Synthetic Data | Not Financial Advice")
-	console.log("============================================================\n")
+	console.log(
+		renderBanner({
+			title: `LIVE Randomized Chaos Stream (${maxTicks} ticks)`,
+			subtitle: `Live Multi-Agent Stress Test on ${providerLabel}`,
+			badges: [providerLabel, `Budget: ${maxLlmCalls} calls`, `Ticks: ${maxTicks}`],
+		}),
+	)
 
 	const controller = new SessionController()
 	let seenLogs = 0
@@ -37,7 +49,7 @@ async function runLiveContinuousStream(
 		const snap = controller.getSnapshot()
 		while (seenLogs < snap.logs.length) {
 			const text = snap.logs[seenLogs].text
-			console.log(text)
+			console.log(formatStreamLog(text))
 			const trapMatch = text.match(/\[Stream #\d+\]\s+(?:TRAP|BENIGN)\s+\[([^\]]+)\]/)
 			if (trapMatch) {
 				trapCounts[trapMatch[1]] = (trapCounts[trapMatch[1]] ?? 0) + 1
@@ -106,34 +118,40 @@ async function runLiveContinuousStream(
 		}
 	}
 
-	console.log(`\n=== LIVE ${maxTicks}-TICK RANDOMIZED STREAM SUMMARY ===`)
-	console.log(`Seed                  : ${finalSnap.stream.seed}`)
-	console.log(`Ticks generated       : ${finalSnap.stream.tickCount} (${finalSnap.stream.trapsInjected} scenario injections)`)
-	console.log(`Total ledger invoices : ${finalSnap.totalCellsCount}`)
-	console.log(`Peak concurrent loops : ${finalSnap.metrics.peakConcurrentLoops}`)
-	console.log(`Loops completed       : ${finalSnap.metrics.totalLoopsFinished}/${finalSnap.metrics.totalLoopsStarted}`)
-	console.log(`LLM calls used        : ${finalSnap.metrics.llmCalls}${finalSnap.llmBudgetExhausted ? " (budget cap reached)" : ""}`)
-	console.log(`Deterministic matches : ${finalSnap.metrics.deterministicMatches} (0 LLM tokens)`)
-	console.log(`CAS conflicts stopped : ${finalSnap.metrics.casConflictsPrevented}`)
-	console.log(`L1 uncited blocked    : ${finalSnap.metrics.uncitedNumbersBlocked}`)
-	console.log(`Invented nums leaked  : ${finalSnap.metrics.inventedNumbersLeaked}`)
-	console.log(`Stale invalidations   : ${finalSnap.metrics.staleInvalidations}`)
-	console.log(`Human HITL routed     : ${finalSnap.metrics.humanApprovalsRouted}`)
-	console.log(`Unmatched orphan TXs  : ${finalSnap.unmatchedTxIds.join(", ") || "none"}`)
-	console.log(`Unfinished invoices   : ${unfinishedIds.join(", ") || "none"}`)
-	console.log(`Invoice statuses      : ${JSON.stringify(statusCounts)}`)
-	console.log(`Scenario breakdown    : ${JSON.stringify(trapCounts)}`)
+	console.log(renderSection(`LIVE ${maxTicks}-TICK RANDOMIZED STREAM SUMMARY`, `seed ${finalSnap.stream.seed ?? "n/a"}`))
+	console.log(
+		renderKpiGrid(
+			[
+				{
+					label: "Ticks / Scenarios",
+					value: `${finalSnap.stream.tickCount} / ${finalSnap.stream.trapsInjected}`,
+					tone: "cyan",
+				},
+				{ label: "Total Invoices", value: `${finalSnap.totalCellsCount}`, tone: "green" },
+				{ label: "Peak Concurrent", value: `${finalSnap.metrics.peakConcurrentLoops}`, tone: "cyan" },
+				{ label: "Loops Completed", value: `${finalSnap.metrics.totalLoopsFinished}/${finalSnap.metrics.totalLoopsStarted}`, tone: "green" },
+				{ label: "LLM / 0-Token Match", value: `${finalSnap.metrics.llmCalls} / ${finalSnap.metrics.deterministicMatches}`, tone: "green" },
+				{ label: "CAS Stopped", value: `${finalSnap.metrics.casConflictsPrevented}`, tone: "amber" },
+				{ label: "L1 Blocked / Leaked", value: `${finalSnap.metrics.uncitedNumbersBlocked} / ${finalSnap.metrics.inventedNumbersLeaked}`, tone: "red" },
+				{ label: "Stale / HITL", value: `${finalSnap.metrics.staleInvalidations} / ${finalSnap.metrics.humanApprovalsRouted}`, tone: "purple" },
+				{ label: "Unfinished Inv", value: `${unfinishedIds.length}`, tone: unfinishedIds.length === 0 ? "green" : "amber" },
+			],
+			3,
+		),
+	)
+	console.log(`\n${c.slate("Unmatched orphan TXs:")} ${finalSnap.unmatchedTxIds.join(", ") || c.dim("none")}`)
+	console.log(`${c.slate("Unfinished invoices :")} ${unfinishedIds.join(", ") || c.green("none")}`)
+	console.log(`${c.slate("Invoice statuses    :")} ${JSON.stringify(statusCounts)}`)
+	console.log(`${c.slate("Scenario breakdown  :")} ${JSON.stringify(trapCounts)}`)
 
-	console.log("\n=== BLOCKED / REJECTED CLAIMS ===")
-	for (const rej of finalSnap.rejectedAttempts) {
-		console.log(`- [${rej.id}] (${rej.level} / ${rej.code}) ${rej.agentName}.${rej.actionName}: ${rej.reason}`)
-	}
+	console.log(renderSection("BLOCKED / REJECTED CLAIMS", `${finalSnap.rejectedAttempts.length} blocked`))
+	console.log(renderRejectedClaims(finalSnap.rejectedAttempts))
 
 	const outDir = resolve(process.cwd(), "out")
 	mkdirSync(outDir, { recursive: true })
 	const outPath = resolve(outDir, `live-stream-${maxTicks}-audit.jsonl`)
 	writeFileSync(outPath, controller.getAuditJsonl(), "utf8")
-	console.log(`\nLive stream audit trace exported to out/live-stream-${maxTicks}-audit.jsonl (${finalSnap.auditLog.length} entries).`)
+	console.log(`\n${c.green("✔")} Live stream audit trace exported to ${c.cyan(`out/live-stream-${maxTicks}-audit.jsonl`)} ${c.dim(`(${finalSnap.auditLog.length} entries)`)}.`)
 }
 
 async function main(): Promise<void> {
@@ -155,20 +173,21 @@ async function main(): Promise<void> {
 		return
 	}
 
-	console.log("============================================================")
-	console.log(`  LedgerProof — LIVE Mode (${resolved.label})`)
-	console.log("  100% Synthetic Data | Not Financial Advice")
-	console.log("============================================================\n")
+	console.log(
+		renderBanner({
+			title: "LIVE Mode — Black Friday Fixed Pack",
+			subtitle: `Real-time Multi-Agent Execution via ${resolved.label}`,
+			badges: [resolved.label, "Live Policy Safe-Reject"],
+		}),
+	)
 
 	const state = await runBlackFridayScenario({
 		runner: resolved.runner,
 		useNativeRunner: resolved.useNativeRunner,
 		modelName: resolved.modelName,
-		log: (line) => console.log(line),
+		log: (line) => console.log(formatStreamLog(line)),
 		approvalHandler: async (approval) => {
-			console.log(
-				`\n[ProofGate HITL] Policy reviewing ${approval.requestId} ($${(approval.amountCents / 100).toFixed(2)}): ${approval.reason}`,
-			)
+			console.log(`\n${renderHitlBox(approval)}`)
 			return {
 				approved: false,
 				reason: `Safe policy rejected ${approval.requestId}: ${approval.reason}`,
@@ -180,36 +199,38 @@ async function main(): Promise<void> {
 	const gt = loadGroundTruth()
 	const evaluation = evaluateAgainstGroundTruth(state, gt)
 
-	console.log("\n=== LIVE VERIFIED LEDGER ===")
-	for (const [id, cell] of state.cells.entries()) {
+	console.log(renderSection("LIVE VERIFIED LEDGER", `${state.cells.size} invoices`))
+	const ledgerRows = [...state.cells.entries()].map(([invoiceId, cell]) => {
 		const snap = cell.read()
-		const rec = snap.value
-		const txs = rec.matchedTxIds.join(", ") || "-"
-		const flags = rec.riskFlags.join(", ") || "-"
-		const staled = rec.drafts.filter((d) => d.status === "STALE").length
-		console.log(
-			`${id} (v${snap.version}) | ${rec.status.padEnd(16)} | $${(rec.paidAmountCents / 100).toFixed(2).padStart(7)} / $${(rec.expectedAmountCents / 100).toFixed(2).padStart(7)} | tx:[${txs}] | flags:[${flags}] | staleDrafts:${staled}`,
-		)
-	}
+		return { invoiceId, version: snap.version, record: snap.value }
+	})
+	console.log(renderLedgerTable(ledgerRows))
 
-	console.log("\n=== BLOCKED / REJECTED CLAIMS ===")
-	for (const rej of state.rejectedAttempts) {
-		console.log(`- [${rej.id}] (${rej.level} / ${rej.code}) ${rej.agentName}.${rej.actionName}: ${rej.reason}`)
-	}
+	console.log(renderSection("BLOCKED / REJECTED CLAIMS", `${state.rejectedAttempts.length} blocked`))
+	console.log(renderRejectedClaims(state.rejectedAttempts))
 
-	console.log("\n=== LIVE CONCURRENCY & GROUND-TRUTH SUMMARY ===")
-	console.log(`Invoices matched GT   : ${evaluation.casesPassed}/${evaluation.casesTotal}`)
-	console.log(`Peak concurrent loops : ${state.metrics.peakConcurrentLoops}`)
-	console.log(`Total loops completed : ${state.metrics.totalLoopsFinished}/${state.metrics.totalLoopsStarted}`)
-	console.log(`CAS conflicts stopped : ${state.metrics.casConflictsPrevented}`)
-	console.log(`Uncited/fake blocked  : ${state.metrics.uncitedNumbersBlocked}`)
-	console.log(`Invented nums leaked  : ${state.metrics.inventedNumbersLeaked}`)
-	console.log(`Stale invalidations   : ${state.metrics.staleInvalidations}`)
-	console.log(`Human HITL routed     : ${state.metrics.humanApprovalsRouted}`)
+	console.log(renderSection("LIVE CONCURRENCY & GROUND-TRUTH SUMMARY"))
+	console.log(
+		renderKpiGrid(
+			[
+				{
+					label: "GT Invoices Matched",
+					value: `${evaluation.casesPassed}/${evaluation.casesTotal}`,
+					tone: evaluation.casesPassed === evaluation.casesTotal ? "green" : "amber",
+				},
+				{ label: "Peak Concurrent Loops", value: `${state.metrics.peakConcurrentLoops}`, tone: "cyan" },
+				{ label: "Loops Completed", value: `${state.metrics.totalLoopsFinished}/${state.metrics.totalLoopsStarted}`, tone: "green" },
+				{ label: "CAS Stopped", value: `${state.metrics.casConflictsPrevented}`, tone: "amber" },
+				{ label: "L1 Blocked / Leaked", value: `${state.metrics.uncitedNumbersBlocked} / ${state.metrics.inventedNumbersLeaked}`, tone: "red" },
+				{ label: "Stale / HITL", value: `${state.metrics.staleInvalidations} / ${state.metrics.humanApprovalsRouted}`, tone: "purple" },
+			],
+			3,
+		),
+	)
 	if (evaluation.failures.length > 0) {
-		console.log("Notes / deltas vs mock proof:")
+		console.log(`\n${c.amber("Notes / deltas vs mock proof:")}`)
 		for (const f of evaluation.failures) {
-			console.log(`  - ${f}`)
+			console.log(`  ${c.amber("•")} ${f}`)
 		}
 	}
 
@@ -217,7 +238,7 @@ async function main(): Promise<void> {
 	mkdirSync(outDir, { recursive: true })
 	const jsonl = state.auditLog.map((entry) => JSON.stringify(entry)).join("\n") + "\n"
 	writeFileSync(resolve(outDir, "live-audit-trace.jsonl"), jsonl, "utf8")
-	console.log(`\nLive audit trace exported to out/live-audit-trace.jsonl (${state.auditLog.length} entries).`)
+	console.log(`\n${c.green("✔")} Live audit trace exported to ${c.cyan("out/live-audit-trace.jsonl")} ${c.dim(`(${state.auditLog.length} entries)`)}.`)
 }
 
 main().catch((err) => {

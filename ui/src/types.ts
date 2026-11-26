@@ -120,6 +120,7 @@ export interface SessionSnapshot {
 		tickCount: number
 		trapsInjected: number
 		intervalMs: number
+		seed?: number | null
 	}
 	disclaimer: string
 	spendingLimitCents: number

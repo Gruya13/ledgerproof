@@ -1,3 +1,4 @@
+import { useState, type ReactNode } from "react"
 import type { SourceInspectPayload } from "../types"
 
 export interface SepaXmlPreview {
@@ -19,7 +20,104 @@ interface Props {
 
 const QUICK_IDS = ["INV-1006", "INV-1007", "INV-1009", "INV-1010", "INV-1011", "REQ-3002", "REQ-3003", "TX-2014", "TX-2016", "TX-2017", "VND-04"]
 
+function highlightJsonLine(line: string, lineIdx: number): ReactNode {
+	const tokens = line.split(/("(?:\\.|[^"])*"\s*:|"(?:\\.|[^"])*"|\b-?\d+(?:\.\d+)?\b|\btrue\b|\bfalse\b|\bnull\b)/g)
+	return (
+		<div key={lineIdx}>
+			{tokens.map((tok, i) => {
+				if (!tok) return null
+				if (/^"(?:\\.|[^"])*"\s*:$/.test(tok)) {
+					return (
+						<span key={i} className="tok-key">
+							{tok}
+						</span>
+					)
+				}
+				if (/^"/.test(tok)) {
+					return (
+						<span key={i} className="tok-str">
+							{tok}
+						</span>
+					)
+				}
+				if (/^-?\d/.test(tok)) {
+					return (
+						<span key={i} className="tok-num">
+							{tok}
+						</span>
+					)
+				}
+				if (tok === "true" || tok === "false" || tok === "null") {
+					return (
+						<span key={i} className="tok-bool">
+							{tok}
+						</span>
+					)
+				}
+				return <span key={i}>{tok}</span>
+			})}
+		</div>
+	)
+}
+
+function highlightXmlLine(line: string, lineIdx: number): ReactNode {
+	if (line.trim().startsWith("<!--") || line.trim().startsWith("<?")) {
+		return (
+			<div key={lineIdx} className="tok-comment">
+				{line}
+			</div>
+		)
+	}
+	const parts = line.split(/(<\/?[\w:.-]+|\s+[\w:.-]+="[^"]*"|\/?>)/g)
+	return (
+		<div key={lineIdx}>
+			{parts.map((part, i) => {
+				if (!part) return null
+				if (part.startsWith("<") || part === ">" || part === "/>") {
+					return (
+						<span key={i} className="tok-tag">
+							{part}
+						</span>
+					)
+				}
+				if (/^\s+[\w:.-]+=/.test(part)) {
+					return (
+						<span key={i} className="tok-attr">
+							{part}
+						</span>
+					)
+				}
+				return (
+					<span key={i} className="tok-str">
+						{part}
+					</span>
+				)
+			})}
+		</div>
+	)
+}
+
 export function SourceDrawer({ sessionId, selectedSource, selectedSepaXml, loading, error, onInspectSource }: Props) {
+	const [copied, setCopied] = useState(false)
+	const [showFullHash, setShowFullHash] = useState(false)
+
+	async function copyContent(text: string) {
+		try {
+			await navigator.clipboard.writeText(text)
+			setCopied(true)
+			setTimeout(() => setCopied(false), 1600)
+		} catch {
+			// clipboard unavailable in non-HTTPS contexts
+		}
+	}
+
+	const activeHash = selectedSepaXml?.sha256 ?? selectedSource?.entity.sha256 ?? null
+	const activePayload = selectedSepaXml
+		? selectedSepaXml.xml
+		: selectedSource
+			? JSON.stringify(selectedSource.entity.data, null, 2)
+			: null
+
 	return (
 		<div className="card">
 			<div className="card-header">
@@ -45,42 +143,60 @@ export function SourceDrawer({ sessionId, selectedSource, selectedSepaXml, loadi
 			{loading && <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Loading source record…</div>}
 			{error && <div style={{ fontSize: 12.5, color: "#fda4af" }}>{error}</div>}
 
-			{selectedSepaXml ? (
+			{activePayload && (
 				<div>
-					<div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, fontSize: 12, marginTop: 6, flexWrap: "wrap" }}>
+					<div className="source-meta-bar">
 						<span>
-							<strong className="mono">{selectedSepaXml.invoiceId}</strong> · {selectedSepaXml.messageId}
+							{selectedSepaXml ? (
+								<>
+									<strong className="mono">{selectedSepaXml.invoiceId}</strong> · {selectedSepaXml.messageId}
+								</>
+							) : (
+								<>
+									<strong className="mono">{selectedSource!.sourceId}</strong> ({selectedSource!.entity.kind})
+								</>
+							)}
 						</span>
-						<div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-							<span className="mono" style={{ color: "#6ee7b7" }} title={selectedSepaXml.sha256}>
-								sha256:{selectedSepaXml.sha256.slice(0, 16)}…
-							</span>
-							<a
+
+						<div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+							{activeHash && (
+								<button
+									type="button"
+									className="hash-chip mono"
+									title={`Click to toggle full SHA-256 (${activeHash})`}
+									onClick={() => setShowFullHash((prev) => !prev)}
+								>
+									sha256:{showFullHash ? activeHash : `${activeHash.slice(0, 16)}…`}
+								</button>
+							)}
+							<button
+								type="button"
 								className="src-pill mono"
-								href={`/api/sepa/${encodeURIComponent(selectedSepaXml.invoiceId)}.xml?session=${encodeURIComponent(sessionId)}`}
-								download={`pain.001-${selectedSepaXml.invoiceId}.xml`}
+								onClick={() => void copyContent(activePayload)}
 							>
-								Download XML
-							</a>
+								{copied ? "Copied!" : "Copy"}
+							</button>
+							{selectedSepaXml && (
+								<a
+									className="src-pill mono"
+									href={`/api/sepa/${encodeURIComponent(selectedSepaXml.invoiceId)}.xml?session=${encodeURIComponent(sessionId)}`}
+									download={`pain.001-${selectedSepaXml.invoiceId}.xml`}
+								>
+									Download XML
+								</a>
+							)}
 						</div>
 					</div>
-					<pre className="source-json mono">{selectedSepaXml.xml}</pre>
-				</div>
-			) : selectedSource ? (
-				<div>
-					<div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginTop: 6 }}>
-						<span>
-							<strong className="mono">{selectedSource.sourceId}</strong> ({selectedSource.entity.kind})
-						</span>
-						<span className="mono" style={{ color: "#6ee7b7" }} title={selectedSource.entity.sha256}>
-							sha256:{selectedSource.entity.sha256.slice(0, 16)}…
-						</span>
-					</div>
+
 					<pre className="source-json mono">
-						{JSON.stringify(selectedSource.entity.data, null, 2)}
+						{selectedSepaXml
+							? selectedSepaXml.xml.split("\n").map((line, i) => highlightXmlLine(line, i))
+							: activePayload.split("\n").map((line, i) => highlightJsonLine(line, i))}
 					</pre>
 				</div>
-			) : (
+			)}
+
+			{!activePayload && !loading && !error && (
 				<div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 8 }}>
 					Click any <span className="mono">[src:ID]</span> pill, invoice, transaction, or <span className="mono">Preview pain.001</span> to inspect raw SHA-256 records or ISO 20022 XML.
 				</div>
