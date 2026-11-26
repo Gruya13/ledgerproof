@@ -1,11 +1,14 @@
 # LedgerProof
 
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-ledgerproof.ig--systems.rs-10b981)](https://ledgerproof.ig-systems.rs)
 [![CI](https://github.com/Gruya13/ledgerproof/actions/workflows/ci.yml/badge.svg)](https://github.com/Gruya13/ledgerproof/actions/workflows/ci.yml)
 ![Docker](https://img.shields.io/badge/Docker-AMD64%20%7C%20ARM64-2496ED?logo=docker&logoColor=white)
 ![Mozaik](https://img.shields.io/badge/Mozaik-%40mozaik--ai%2Fcore%206.0.0-38bdf8)
 ![Node](https://img.shields.io/badge/Node-%3E%3D22-339933?logo=node.js&logoColor=white)
 ![Tests](https://img.shields.io/badge/Tests-27%20passing-10b981)
 [![License: MIT](https://img.shields.io/badge/License-MIT-f59e0b)](LICENSE)
+
+> **Live Interactive Demo (Zero API Key Required):** **https://ledgerproof.ig-systems.rs**
 
 **LedgerProof reconciles high-volume Black Friday payments across concurrent Mozaik agents (`@mozaik-ai/core@6.0.0`) — settling clean invoices deterministically with zero LLM tokens while mechanically blocking hallucinated numbers, write-skew refunds, and spoofed BEC IBAN payouts mid-loop.**
 
@@ -49,12 +52,14 @@ Each concurrent `runLoop(...)` receives a fresh isolated `ModelContext` and its 
 
 ## 60-Second Judge Walkthrough (Zero API Key Required)
 
+Try the hosted deployment directly at **https://ledgerproof.ig-systems.rs**, or run locally:
+
 ```bash
 npm install
 npm run ui
 ```
 
-Open **http://localhost:4317** in your browser and click **Start Interactive Stream**:
+Open **http://localhost:4317** (or **https://ledgerproof.ig-systems.rs**) in your browser and click **Start Interactive Stream**:
 1. **The "Wow" Moment — Non-Blocking BEC HITL:** Watch the **Concurrent Mozaik Agent Swimlanes** run in parallel. `ProofGate` pauses **only** `REQ-3002` (`€640.00` spoofed vendor IBAN on `INV-1010`) for human review while all other invoices converge concurrently — click **Reject (Lock HOLD_RISK)**.
 2. **Causal `STALE` Invalidation:** Click **Inject Late Settlement (TX-2017)** to watch `INV-1007` close and its active overdue chase draft flip automatically to **`STALE`**.
 3. **Evidence & Catches:** Open **Blocked / Rejected Claims** (L1 hallucination `$319.99 / TX-9999` + L2 CAS write-skew catch on `INV-1011`), click any `[src:ID]` pill to verify its `SHA-256` source record, or optionally **Preview pain.001** on `SEPA_DRAFT_READY` rows (`INV-1001`, `INV-1012`).
