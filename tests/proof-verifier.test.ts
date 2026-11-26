@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { SourceStore } from "../src/engine/source-store"
-import { verifyMessageCitations, verifyToolProposal } from "../src/engine/proof-verifier"
+import { verifyClaimConfirmation, verifyMessageCitations, verifyToolProposal } from "../src/engine/proof-verifier"
 import { loadPack } from "../src/runner-setup"
 
 describe("ProofVerifier L1 deterministic source & math gates", () => {
@@ -259,5 +259,127 @@ describe("ProofVerifier L1 deterministic source & math gates", () => {
 		)
 		expect(res.ok).toBe(false)
 		expect(res.code).toBe("VENDOR_MISMATCH")
+	})
+
+	it("blocks record_reconciliation on vendor mismatch and requires valid basedOnVersion on draft_overdue_chase", () => {
+		const crossVendorTxStore = SourceStore.fromPack(loadPack())
+		crossVendorTxStore.addTransaction({
+			sourceId: "TX-CROSS-99",
+			kind: "bank_transfer",
+			reference: "INV-1001",
+			vendorId: "VND-06",
+			amountCents: 14500,
+			currency: "EUR",
+			bookedAt: "2026-11-26",
+			memo: "Cross vendor wire",
+			late: false,
+		})
+		const recRes = verifyToolProposal(
+			"record_reconciliation",
+			{
+				invoiceId: "INV-1001",
+				txIds: ["TX-CROSS-99"],
+				amountCents: 14500,
+				citations: [
+					{ sourceId: "INV-1001", field: "amountCents", expectedValue: 14500 },
+					{ sourceId: "TX-CROSS-99", field: "amountCents", expectedValue: 14500 },
+				],
+			},
+			crossVendorTxStore,
+		)
+		expect(recRes.ok).toBe(false)
+		expect(recRes.code).toBe("VENDOR_MISMATCH")
+
+		const noVersionChase = verifyToolProposal(
+			"draft_overdue_chase",
+			{
+				invoiceId: "INV-1007",
+				amountCents: 30000,
+				citations: [{ sourceId: "INV-1007", field: "amountCents", expectedValue: 80000 }],
+			},
+			store,
+		)
+		expect(noVersionChase.ok).toBe(false)
+		expect(noVersionChase.code).toBe("MISSING_BASED_ON_VERSION")
+
+		const zeroAmountChase = verifyToolProposal(
+			"draft_overdue_chase",
+			{
+				invoiceId: "INV-1007",
+				amountCents: 0,
+				basedOnVersion: 2,
+				citations: [{ sourceId: "INV-1007", field: "amountCents", expectedValue: 80000 }],
+			},
+			store,
+		)
+		expect(zeroAmountChase.ok).toBe(false)
+		expect(zeroAmountChase.code).toBe("INVALID_CHASE_AMOUNT")
+	})
+
+	it("mathematically validates SkepticAuditor claim confirmations against SourceStore", () => {
+		const validSplit = verifyClaimConfirmation(
+			{
+				claimId: "CLM-SPLIT-VALID",
+				invoiceId: "INV-1006",
+				producer: "Reconciler",
+				kind: "SPLIT_MATCH",
+				amountCents: 120000,
+				summary: "TX-2006 + TX-2007 = INV-1006",
+				citations: [],
+				auditStatus: "PENDING",
+				createdAt: new Date().toISOString(),
+			},
+			[
+				{ sourceId: "INV-1006", field: "amountCents", expectedValue: 120000 },
+				{ sourceId: "TX-2006", field: "amountCents", expectedValue: 70000 },
+				{ sourceId: "TX-2007", field: "amountCents", expectedValue: 50000 },
+			],
+			store,
+		)
+		expect(validSplit.ok).toBe(true)
+
+		// Citations valid in SourceStore, but sum of cited TX (70000) != claimed amount (120000)
+		const badMathSplit = verifyClaimConfirmation(
+			{
+				claimId: "CLM-SPLIT-BAD-MATH",
+				invoiceId: "INV-1006",
+				producer: "Reconciler",
+				kind: "SPLIT_MATCH",
+				amountCents: 120000,
+				summary: "Incomplete split",
+				citations: [],
+				auditStatus: "PENDING",
+				createdAt: new Date().toISOString(),
+			},
+			[
+				{ sourceId: "INV-1006", field: "amountCents", expectedValue: 120000 },
+				{ sourceId: "TX-2006", field: "amountCents", expectedValue: 70000 },
+			],
+			store,
+		)
+		expect(badMathSplit.ok).toBe(false)
+		expect(badMathSplit.code).toBe("ARITHMETIC_MISMATCH")
+
+		// Bad CHASE_DRAFT delta (claims $400 instead of $800 - $500 = $300)
+		const badChase = verifyClaimConfirmation(
+			{
+				claimId: "CLM-CHASE-BAD",
+				invoiceId: "INV-1007",
+				producer: "PayoutAndRefund",
+				kind: "CHASE_DRAFT",
+				amountCents: 40000,
+				summary: "Wrong chase balance",
+				citations: [],
+				auditStatus: "PENDING",
+				createdAt: new Date().toISOString(),
+			},
+			[
+				{ sourceId: "INV-1007", field: "amountCents", expectedValue: 80000 },
+				{ sourceId: "TX-2008", field: "amountCents", expectedValue: 50000 },
+			],
+			store,
+		)
+		expect(badChase.ok).toBe(false)
+		expect(badChase.code).toBe("ARITHMETIC_MISMATCH")
 	})
 })

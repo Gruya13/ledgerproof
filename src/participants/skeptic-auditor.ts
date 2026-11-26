@@ -12,6 +12,7 @@ import {
 	type Tool,
 } from "@mozaik-ai/core"
 import type { LedgerRuntimeApi } from "../runtime"
+import { verifyClaimConfirmation } from "../engine/proof-verifier"
 import { ProofGateInterceptionHandler } from "../interception/proof-gate"
 import { CITATION_ARRAY_SCHEMA } from "./schemas"
 import type { Citation, ClaimRecord } from "../types"
@@ -49,6 +50,28 @@ export function createSkepticAuditorAgent(rt: LedgerRuntimeApi, modelName: strin
 			const state = rt.resolveRuntime().state
 			const target = state.claims.find((c) => c.claimId === args.claimId)
 			if (!target) return { ok: false, reason: `Claim ${args.claimId} not found` }
+
+			if (args.verdict === "CONFIRMED") {
+				const ledgerRecord = target.invoiceId ? state.getCell(target.invoiceId)?.read().value : undefined
+				const check = verifyClaimConfirmation(target, args.citations, state.sourceStore, ledgerRecord)
+				if (!check.ok) {
+					state.metrics.uncitedNumbersBlocked += 1
+					const rejection = state.recordRejection({
+						level: "L1_SOURCE_OR_MATH",
+						code: "AUDIT_CONFIRMATION_UNVERIFIED",
+						agentName: "SkepticAuditor",
+						actionName: args.claimId,
+						reason: check.reason ?? `Cannot confirm ${args.claimId}: citations do not prove claim`,
+						rawArgs: args,
+					})
+					rt.sendEvent(SemanticEvent.create("proof.blocked", selfId, rejection), selfId)
+					return {
+						ok: false,
+						code: "AUDIT_CONFIRMATION_UNVERIFIED",
+						reason: rejection.reason,
+					}
+				}
+			}
 
 			target.auditStatus = args.verdict
 			target.auditorNote = args.note

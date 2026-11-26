@@ -42,7 +42,31 @@ export function createStrictMatcherParticipant(rt: LedgerRuntimeApi) {
 
 				const snap = cell.read()
 				const newPaid = snap.value.paidAmountCents + tx.amountCents
-				const isSettled = newPaid === targetInv.amountCents && tx.currency === targetInv.currency
+				let rejectionReason: string | null = null
+				if (!tx.vendorId || tx.vendorId !== targetInv.vendorId) {
+					rejectionReason = `Late settlement ${tx.sourceId} vendor (${tx.vendorId ?? "unknown"}) does not match ${targetInv.sourceId} vendor (${targetInv.vendorId})`
+				} else if (tx.currency !== targetInv.currency) {
+					rejectionReason = `Late settlement ${tx.sourceId} currency (${tx.currency}) does not match ${targetInv.sourceId} currency (${targetInv.currency})`
+				} else if (tx.amountCents <= 0 || newPaid > targetInv.amountCents) {
+					rejectionReason = `Late settlement ${tx.sourceId} (${tx.amountCents} cents) would exceed invoice ${targetInv.sourceId} amount (${targetInv.amountCents} cents)`
+				}
+
+				if (rejectionReason) {
+					state.logAudit("settlement.late_rejected", "StrictMatcher", targetInv.sourceId, {
+						txId: tx.sourceId,
+						reason: rejectionReason,
+					})
+					rt.sendEvent(
+						SemanticEvent.create("match.ambiguous", matcherId, {
+							transaction: tx,
+							reason: rejectionReason,
+						}),
+						matcherId,
+					)
+					return
+				}
+
+				const isSettled = newPaid === targetInv.amountCents
 				const nextStatus = isSettled ? "MATCHED" : "PARTIAL"
 
 				const casRes = cell.casWrite(snap.version, (cur) => ({

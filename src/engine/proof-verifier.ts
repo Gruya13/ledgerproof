@@ -1,4 +1,4 @@
-import type { Citation } from "../types"
+import type { Citation, ClaimRecord, LedgerRecord } from "../types"
 import type { SourceStore } from "./source-store"
 
 export interface ProofCheckResult {
@@ -18,6 +18,7 @@ export interface ToolProposalArgs {
 	requestId?: string
 	vendorId?: string
 	amountCents?: number
+	basedOnVersion?: number
 	targetIban?: string
 	expectedVersion?: number
 	citations?: Citation[]
@@ -84,6 +85,13 @@ export function verifyToolProposal(
 				const tx = sourceStore.getTransaction(txId)
 				if (!tx) {
 					return { ok: false, code: "UNKNOWN_TRANSACTION", reason: `Unknown transaction ${txId}` }
+				}
+				if (tx.vendorId !== null && tx.vendorId !== inv.vendorId) {
+					return {
+						ok: false,
+						code: "VENDOR_MISMATCH",
+						reason: `Transaction ${txId} vendor (${tx.vendorId}) != invoice ${inv.sourceId} (${inv.vendorId})`,
+					}
 				}
 				if (tx.currency !== inv.currency) {
 					return {
@@ -219,7 +227,24 @@ export function verifyToolProposal(
 				}
 			}
 		} else if (toolName === "draft_overdue_chase") {
-			// Overdue chase amount must match remaining balance (verified via citations on invoice + partial tx)
+			if (
+				args.basedOnVersion === undefined ||
+				!Number.isInteger(args.basedOnVersion) ||
+				args.basedOnVersion < 1
+			) {
+				return {
+					ok: false,
+					code: "MISSING_BASED_ON_VERSION",
+					reason: "draft_overdue_chase requires positive integer basedOnVersion",
+				}
+			}
+			if (args.amountCents === undefined || args.amountCents <= 0) {
+				return {
+					ok: false,
+					code: "INVALID_CHASE_AMOUNT",
+					reason: "draft_overdue_chase requires positive integer amountCents",
+				}
+			}
 			const citedIds = new Set((args.citations ?? []).map((c) => c.sourceId))
 			if (!citedIds.has(inv.sourceId)) {
 				return { ok: false, code: "MISSING_INVOICE_CITATION", reason: `Chase draft must cite ${inv.sourceId}` }
@@ -231,6 +256,221 @@ export function verifyToolProposal(
 		if (!args.invoiceId || !sourceStore.getInvoice(args.invoiceId)) {
 			return { ok: false, code: "UNKNOWN_INVOICE", reason: `flag_risk requires valid invoiceId` }
 		}
+	}
+
+	return { ok: true }
+}
+
+/**
+ * Independently checks that a SkepticAuditor `CONFIRMED` verdict has citations whose
+ * SourceStore entities mathematically and structurally prove the original ClaimRecord.
+ */
+export function verifyClaimConfirmation(
+	claim: ClaimRecord,
+	citations: Citation[],
+	sourceStore: SourceStore,
+	ledgerRecord?: LedgerRecord,
+): ProofCheckResult {
+	const base = verifyCitations(citations, sourceStore)
+	if (!base.ok) return base
+
+	const citedIds = new Set(citations.map((c) => c.sourceId))
+
+	if (claim.kind === "EXACT_MATCH" || claim.kind === "SPLIT_MATCH" || claim.kind === "PARTIAL_MATCH") {
+		if (!claim.invoiceId) {
+			return { ok: false, code: "MISSING_INVOICE_ID", reason: `Claim ${claim.claimId} missing invoiceId` }
+		}
+		const inv = sourceStore.getInvoice(claim.invoiceId)
+		if (!inv || !citedIds.has(inv.sourceId)) {
+			return {
+				ok: false,
+				code: "INCOMPLETE_CITATIONS",
+				reason: `Confirming ${claim.claimId} must cite ${claim.invoiceId}`,
+			}
+		}
+		if (claim.txId && !citedIds.has(claim.txId)) {
+			return {
+				ok: false,
+				code: "INCOMPLETE_CITATIONS",
+				reason: `Confirming ${claim.claimId} must cite ${claim.txId}`,
+			}
+		}
+		let txSum = 0
+		let txCount = 0
+		for (const id of citedIds) {
+			const entity = sourceStore.get(id)
+			if (entity?.kind !== "transaction") continue
+			if (entity.data.currency !== inv.currency) {
+				return {
+					ok: false,
+					code: "CURRENCY_MISMATCH",
+					reason: `Cited transaction ${id} (${entity.data.currency}) != invoice ${inv.sourceId} (${inv.currency})`,
+				}
+			}
+			if (entity.data.vendorId !== null && entity.data.vendorId !== inv.vendorId) {
+				return {
+					ok: false,
+					code: "VENDOR_MISMATCH",
+					reason: `Cited transaction ${id} vendor (${entity.data.vendorId}) != invoice ${inv.sourceId} (${inv.vendorId})`,
+				}
+			}
+			txSum += entity.data.amountCents
+			txCount += 1
+		}
+		if (txCount === 0 || txSum !== claim.amountCents) {
+			return {
+				ok: false,
+				code: "ARITHMETIC_MISMATCH",
+				reason: `Claim ${claim.claimId} amountCents (${claim.amountCents}) != sum of cited transactions (${txSum})`,
+			}
+		}
+		return { ok: true }
+	}
+
+	if (claim.kind === "ORPHAN_TX") {
+		if (!claim.txId) {
+			return { ok: false, code: "MISSING_TX_ID", reason: `Orphan claim ${claim.claimId} missing txId` }
+		}
+		const tx = sourceStore.getTransaction(claim.txId)
+		if (!tx || !citedIds.has(tx.sourceId)) {
+			return {
+				ok: false,
+				code: "INCOMPLETE_CITATIONS",
+				reason: `Confirming orphan claim ${claim.claimId} must cite ${claim.txId}`,
+			}
+		}
+		if (claim.amountCents !== tx.amountCents) {
+			return {
+				ok: false,
+				code: "ARITHMETIC_MISMATCH",
+				reason: `Claim ${claim.claimId} amountCents (${claim.amountCents}) != ${tx.sourceId}.amountCents (${tx.amountCents})`,
+			}
+		}
+		return { ok: true }
+	}
+
+	if (claim.kind === "SEPA_DRAFT" || claim.kind === "REFUND") {
+		if (!claim.invoiceId) {
+			return { ok: false, code: "MISSING_INVOICE_ID", reason: `Claim ${claim.claimId} missing invoiceId` }
+		}
+		const inv = sourceStore.getInvoice(claim.invoiceId)
+		if (!inv || !citedIds.has(inv.sourceId)) {
+			return {
+				ok: false,
+				code: "INCOMPLETE_CITATIONS",
+				reason: `Confirming ${claim.claimId} must cite ${claim.invoiceId}`,
+			}
+		}
+		const expectedKind = claim.kind === "SEPA_DRAFT" ? "sepa_payout" : "refund"
+		const matchingReq = [...citedIds]
+			.map((id) => sourceStore.getRequest(id))
+			.find(
+				(req) =>
+					req !== undefined &&
+					req.invoiceId === inv.sourceId &&
+					req.vendorId === inv.vendorId &&
+					req.currency === inv.currency &&
+					req.kind === expectedKind &&
+					(claim.kind !== "SEPA_DRAFT" || inv.currency === "EUR") &&
+					req.amountCents === claim.amountCents,
+			)
+		if (!matchingReq) {
+			return {
+				ok: false,
+				code: "REQUEST_UNVERIFIED",
+				reason: `Claim ${claim.claimId} (${claim.kind}, ${claim.amountCents}) is not backed by a matching cited PaymentRequest for ${inv.sourceId}`,
+			}
+		}
+		return { ok: true }
+	}
+
+	if (claim.kind === "CHASE_DRAFT") {
+		if (!claim.invoiceId) {
+			return { ok: false, code: "MISSING_INVOICE_ID", reason: `Claim ${claim.claimId} missing invoiceId` }
+		}
+		const inv = sourceStore.getInvoice(claim.invoiceId)
+		if (!inv || !citedIds.has(inv.sourceId)) {
+			return {
+				ok: false,
+				code: "INCOMPLETE_CITATIONS",
+				reason: `Confirming ${claim.claimId} must cite ${claim.invoiceId}`,
+			}
+		}
+		if (claim.amountCents <= 0 || claim.amountCents > inv.amountCents) {
+			return {
+				ok: false,
+				code: "ARITHMETIC_MISMATCH",
+				reason: `Chase claim ${claim.claimId} amountCents (${claim.amountCents}) out of invoice bounds (1..${inv.amountCents})`,
+			}
+		}
+		let citedTxSum = 0
+		let hasCitedTx = false
+		for (const id of citedIds) {
+			const entity = sourceStore.get(id)
+			if (entity?.kind === "transaction" && entity.data.currency === inv.currency) {
+				citedTxSum += entity.data.amountCents
+				hasCitedTx = true
+			}
+		}
+		if (hasCitedTx) {
+			if (inv.amountCents - citedTxSum !== claim.amountCents) {
+				return {
+					ok: false,
+					code: "ARITHMETIC_MISMATCH",
+					reason: `Chase claim ${claim.claimId} (${claim.amountCents}) != ${inv.sourceId} (${inv.amountCents}) - cited partial txs (${citedTxSum})`,
+				}
+			}
+			return { ok: true }
+		}
+		if (ledgerRecord) {
+			const currentRemaining = inv.amountCents - ledgerRecord.paidAmountCents
+			const matchesRecordedDraft = ledgerRecord.drafts.some(
+				(d) => d.kind === "overdue_chase" && d.amountCents === claim.amountCents,
+			)
+			if (claim.amountCents !== currentRemaining && !matchesRecordedDraft) {
+				return {
+					ok: false,
+					code: "ARITHMETIC_MISMATCH",
+					reason: `Chase claim ${claim.claimId} (${claim.amountCents}) does not match remaining balance (${currentRemaining})`,
+				}
+			}
+		}
+		return { ok: true }
+	}
+
+	if (claim.kind === "RISK_FLAG") {
+		const inv = claim.invoiceId ? sourceStore.getInvoice(claim.invoiceId) : undefined
+		if (!inv) {
+			const tx = claim.txId ? sourceStore.getTransaction(claim.txId) : undefined
+			if (!tx || !citedIds.has(tx.sourceId) || claim.amountCents !== tx.amountCents) {
+				return {
+					ok: false,
+					code: "RISK_UNVERIFIED",
+					reason: `Risk claim ${claim.claimId} has no matching cited source entity`,
+				}
+			}
+			return { ok: true }
+		}
+		let linkedToInvoice = citedIds.has(inv.sourceId)
+		let amountBacked = claim.amountCents === inv.amountCents
+		for (const id of citedIds) {
+			const entity = sourceStore.get(id)
+			if (!entity) continue
+			if (entity.kind === "request" && entity.data.invoiceId === inv.sourceId) {
+				linkedToInvoice = true
+				if (entity.data.amountCents === claim.amountCents) amountBacked = true
+			} else if (entity.kind === "transaction" && entity.data.amountCents === claim.amountCents) {
+				amountBacked = true
+			}
+		}
+		if (!linkedToInvoice || !amountBacked) {
+			return {
+				ok: false,
+				code: "RISK_UNVERIFIED",
+				reason: `Risk claim ${claim.claimId} citations do not link to ${inv.sourceId} with amount ${claim.amountCents}`,
+			}
+		}
+		return { ok: true }
 	}
 
 	return { ok: true }

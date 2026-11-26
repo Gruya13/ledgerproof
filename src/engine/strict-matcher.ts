@@ -55,6 +55,14 @@ export function matchTransactionStrict(tx: BankTransaction, invoices: Invoice[])
 	}
 
 	const invoice = candidates[0]
+	if (!tx.vendorId || tx.vendorId !== invoice.vendorId) {
+		return {
+			matched: false,
+			kind: "NONE",
+			reason: `Vendor mismatch between ${tx.sourceId} (${tx.vendorId ?? "unknown"}) and ${invoice.sourceId} (${invoice.vendorId})`,
+		}
+	}
+
 	if (invoice.currency !== tx.currency) {
 		return {
 			matched: false,

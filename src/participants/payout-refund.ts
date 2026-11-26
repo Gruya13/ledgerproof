@@ -254,25 +254,37 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 		}) => {
 			const state = rt.resolveRuntime().state
 			const cell = state.getCell(args.invoiceId)
-			if (!cell) return { ok: false, reason: "Unknown invoice" }
+			const inv = state.sourceStore.getInvoice(args.invoiceId)
+			if (!cell || !inv) return { ok: false, reason: "Unknown invoice" }
 			const snap = cell.read()
-			const invCurrency = state.sourceStore.getInvoice(args.invoiceId)?.currency ?? snap.value.currency
-			const casRes = cell.casWrite(snap.version, (cur) => ({
+			if (args.basedOnVersion !== snap.version) {
+				return { ok: false, reason: "cas.rejected", currentVersion: snap.version }
+			}
+			const remainingCents = inv.amountCents - snap.value.paidAmountCents
+			if (remainingCents <= 0 || snap.value.status === "MATCHED" || args.amountCents !== remainingCents) {
+				return {
+					ok: false,
+					reason: "chase.amount_mismatch",
+					expectedRemainingCents: Math.max(0, remainingCents),
+				}
+			}
+			const invCurrency = inv.currency
+			const casRes = cell.casWrite(args.basedOnVersion, (cur) => ({
 				...cur,
 				drafts: [
 					...cur.drafts,
 					{
 						draftId: `CHASE-${args.invoiceId}-${cur.drafts.length + 1}`,
 						kind: "overdue_chase",
-						amountCents: args.amountCents,
+						amountCents: remainingCents,
 						basedOnVersion: args.basedOnVersion,
-						status: snap.value.status === "MATCHED" ? "STALE" : "ACTIVE",
+						status: "ACTIVE",
 						createdBy: "PayoutAndRefund",
 						createdAt: new Date().toISOString(),
 						citations: args.citations,
 					},
 				],
-				notes: [...cur.notes, `Overdue chase draft prepared for ${formatMoney(args.amountCents, invCurrency)}`],
+				notes: [...cur.notes, `Overdue chase draft prepared for ${formatMoney(remainingCents, invCurrency)}`],
 			}))
 			if (!casRes.ok) return { ok: false, reason: "cas.rejected" }
 			const claim: ClaimRecord = {
@@ -280,7 +292,7 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 				invoiceId: args.invoiceId,
 				producer: "PayoutAndRefund",
 				kind: "CHASE_DRAFT",
-				amountCents: args.amountCents,
+				amountCents: remainingCents,
 				currency: invCurrency,
 				summary: args.reason ?? `Overdue chase draft for ${args.invoiceId}`,
 				citations: args.citations,
@@ -289,7 +301,7 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 			}
 			state.addClaim(claim)
 			rt.sendEvent(SemanticEvent.create("claim.proposed", selfId, { claim }), selfId)
-			return { ok: true, draftStatus: "ACTIVE", basedOnVersion: args.basedOnVersion }
+			return { ok: true, draftStatus: "ACTIVE", amountCents: remainingCents, basedOnVersion: args.basedOnVersion }
 		},
 	}
 

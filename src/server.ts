@@ -1,4 +1,5 @@
 import "dotenv/config"
+import { timingSafeEqual } from "node:crypto"
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { extname, resolve, sep } from "node:path"
@@ -64,9 +65,29 @@ function resolveSessionId(req: IncomingMessage, url: URL): string {
 	return "default"
 }
 
+function isAuthorizedApiRequest(req: IncomingMessage, url: URL, apiToken?: string): boolean {
+	if (!apiToken) return true
+	const authHeader = req.headers.authorization
+	const bearer =
+		typeof authHeader === "string" && authHeader.toLowerCase().startsWith("bearer ")
+			? authHeader.slice(7).trim()
+			: undefined
+	const headerTokenRaw = req.headers["x-api-token"]
+	const headerToken = Array.isArray(headerTokenRaw) ? headerTokenRaw[0]?.trim() : headerTokenRaw?.trim()
+	const queryToken = url.searchParams.get("token")?.trim()
+	const candidate = bearer || headerToken || queryToken
+	if (!candidate) return false
+
+	const expectedBuf = Buffer.from(apiToken, "utf8")
+	const actualBuf = Buffer.from(candidate, "utf8")
+	if (expectedBuf.length !== actualBuf.length) return false
+	return timingSafeEqual(expectedBuf, actualBuf)
+}
+
 export function createLedgerServer(
 	controller = new SessionController(),
 	distUiDir = resolve(process.cwd(), "dist-ui"),
+	apiToken = process.env.LEDGERPROOF_API_TOKEN?.trim() || undefined,
 ): { server: Server; controller: SessionController } {
 	const sessions = new Map<string, SessionEntry>()
 
@@ -182,6 +203,11 @@ export function createLedgerServer(
 				return
 			}
 
+			if (path.startsWith("/api/") && !isAuthorizedApiRequest(req, url, apiToken)) {
+				sendJson(res, 401, { ok: false, error: "Unauthorized" })
+				return
+			}
+
 			const session = getOrCreateSession(resolveSessionId(req, url))
 			const activeController = session.controller
 
@@ -215,6 +241,7 @@ export function createLedgerServer(
 					autoApprovePolicy:
 						typeof body.autoApprovePolicy === "boolean" ? body.autoApprovePolicy : false,
 					staggerMs: typeof body.staggerMs === "number" ? body.staggerMs : undefined,
+					maxLlmCalls: typeof body.maxLlmCalls === "number" ? body.maxLlmCalls : undefined,
 				})
 				if (!result.ok) {
 					sendJson(res, 400, result)

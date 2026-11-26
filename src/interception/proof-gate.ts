@@ -126,6 +126,103 @@ export class ProofGateInterceptionHandler implements InterceptionHandler {
 
 		const args = parsed as ToolProposalArgs
 
+		if (call.name === "draft_overdue_chase") {
+			const cell = args.invoiceId ? state.getCell(args.invoiceId) : undefined
+			const inv = args.invoiceId ? state.sourceStore.getInvoice(args.invoiceId) : undefined
+			if (!cell || !inv) {
+				return this.rejectToolCall(
+					call,
+					inferenceInput,
+					JSON.stringify({
+						ok: false,
+						blockedBy: "ProofGate-L1",
+						code: "UNKNOWN_INVOICE",
+						reason: `No ledger cell/invoice found for ${args.invoiceId}`,
+					}),
+				)
+			}
+
+			const snap = cell.read()
+			if (args.basedOnVersion !== snap.version) {
+				state.metrics.casConflictsPrevented += 1
+				const conflictReason = `Chase draft on ${args.invoiceId} basedOnVersion (${String(args.basedOnVersion)}) != current version ${snap.version}`
+				const rejection = state.recordRejection({
+					level: "L2_CAS_WRITE_SKEW",
+					code: "CHASE_VERSION_STALE",
+					agentName: this.agentName,
+					actionName: call.name,
+					reason: conflictReason,
+					rawArgs: parsed,
+				})
+				this.rt.sendEvent(
+					SemanticEvent.create("conflict.prevented", this.agentId, {
+						invoiceId: args.invoiceId,
+						rejection,
+					}),
+					this.agentId,
+				)
+				return this.rejectToolCall(
+					call,
+					inferenceInput,
+					JSON.stringify({
+						ok: false,
+						blockedBy: "ProofGate-L2-CAS",
+						code: "CHASE_VERSION_STALE",
+						reason: conflictReason,
+					}),
+				)
+			}
+
+			const remainingCents = inv.amountCents - snap.value.paidAmountCents
+			if (remainingCents <= 0 || snap.value.status === "MATCHED") {
+				state.metrics.uncitedNumbersBlocked += 1
+				const reason = `Invoice ${inv.sourceId} has no remaining unpaid balance (remaining=${remainingCents} cents, status=${snap.value.status})`
+				const rejection = state.recordRejection({
+					level: "L1_SOURCE_OR_MATH",
+					code: "NO_REMAINING_BALANCE",
+					agentName: this.agentName,
+					actionName: call.name,
+					reason,
+					rawArgs: parsed,
+				})
+				this.rt.sendEvent(SemanticEvent.create("proof.blocked", this.agentId, rejection), this.agentId)
+				return this.rejectToolCall(
+					call,
+					inferenceInput,
+					JSON.stringify({
+						ok: false,
+						blockedBy: "ProofGate-L1",
+						code: "NO_REMAINING_BALANCE",
+						reason,
+					}),
+				)
+			}
+
+			if (args.amountCents !== remainingCents) {
+				state.metrics.uncitedNumbersBlocked += 1
+				const reason = `Chase draft amountCents (${String(args.amountCents)}) != deterministic remaining balance (${remainingCents}) for ${inv.sourceId}`
+				const rejection = state.recordRejection({
+					level: "L1_SOURCE_OR_MATH",
+					code: "CHASE_AMOUNT_MISMATCH",
+					agentName: this.agentName,
+					actionName: call.name,
+					reason,
+					rawArgs: parsed,
+				})
+				this.rt.sendEvent(SemanticEvent.create("proof.blocked", this.agentId, rejection), this.agentId)
+				return this.rejectToolCall(
+					call,
+					inferenceInput,
+					JSON.stringify({
+						ok: false,
+						blockedBy: "ProofGate-L1",
+						code: "CHASE_AMOUNT_MISMATCH",
+						reason,
+					}),
+				)
+			}
+		}
+
 		// L2: CAS Write-Skew Gate for payment/refund state mutations
 		if (call.name === "propose_refund" || call.name === "propose_sepa_payout") {
 			const cell = args.invoiceId ? state.getCell(args.invoiceId) : undefined

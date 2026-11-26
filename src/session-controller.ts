@@ -29,6 +29,7 @@ export interface StartRunOptions {
 	manualLateSettlement?: boolean
 	autoApprovePolicy?: boolean
 	staggerMs?: number
+	maxLlmCalls?: number
 }
 
 export interface StartContinuousStreamOptions {
@@ -224,7 +225,10 @@ export class SessionController {
 		const { rt, state, ingestorId } = this.initializeMozaikSession(
 			resolved,
 			options.autoApprovePolicy ?? false,
-			{ seedInvoices: true },
+			{
+				seedInvoices: true,
+				maxLlmCalls: resolved.mode === "live" ? (options.maxLlmCalls ?? 60) : undefined,
+			},
 		)
 		this.ingestorId = ingestorId
 

@@ -5,7 +5,7 @@
 ![Docker](https://img.shields.io/badge/Docker-AMD64%20%7C%20ARM64-2496ED?logo=docker&logoColor=white)
 ![Mozaik](https://img.shields.io/badge/Mozaik-%40mozaik--ai%2Fcore%206.0.0-38bdf8)
 ![Node](https://img.shields.io/badge/Node-%3E%3D22-339933?logo=node.js&logoColor=white)
-![Tests](https://img.shields.io/badge/Tests-27%20passing-10b981)
+![Tests](https://img.shields.io/badge/Tests-34%20passing-10b981)
 [![License: MIT](https://img.shields.io/badge/License-MIT-f59e0b)](LICENSE)
 
 > **Live Interactive Demo (Zero API Key Required):** **https://ledgerproof.ig-systems.rs**
@@ -72,7 +72,8 @@ docker compose up -d --build
 ```
 
 - Runs on `node:22-slim` (works natively on both AMD64 and ARM64/Oracle Ampere) in **zero-key `MockInferenceRunner` mode** (`HOST=0.0.0.0`, `PORT=4317`) so public visitors cannot consume personal API credits.
-- Each browser tab gets an isolated backend `SessionController` (`sessionStorage` ID passed on `/api/*` + 15-minute idle TTL cleanup), so concurrent judges do not overwrite each other's runs.
+- Each browser tab gets an isolated backend `SessionController` (`sessionStorage` ID passed on `/api/*` + 15-minute idle TTL cleanup), so concurrent judges do not overwrite each other's runs without requiring login friction on synthetic demo data.
+- Self-hosted deployments enabling live LLM keys should set `LEDGERPROOF_API_TOKEN` to require bearer/header/query token auth across `/api/*` endpoints (excluding `/api/health`); both `/api/run` (`60` default) and `/api/stream/start` (`40` default) enforce `maxLlmCalls` budget caps in live mode.
 - `/api/events` sets `X-Accel-Buffering: no` with a 25s SSE heartbeat for clean streaming behind **Caddy** (`reverse_proxy localhost:4317`) or **Nginx** (`proxy_buffering off; proxy_http_version 1.1;`).
 
 ### Automated Proof, CLI Demo & Continuous Stream
@@ -119,7 +120,7 @@ Full per-run tables, per-seed metrics, scenario distributions, and engineering n
 
 | Run | Mode / Seed | Scale | Concurrency & Loops | 0-Token Strict Matches | ProofGate Catches & Invariants |
 |---|---|---|---|---|---|
-| `npm test` | `MockInferenceRunner` + HTTP/SSE + Unit | `9` suites / `27` tests | Full concurrent E2E & stream | Deterministic pass | `inventedNumbersLeaked = 0`, session isolation, L1 IBAN/vendor/kind/citation binding, IBAN mod-97, immutable `SourceStore`, post-HITL staleness, refund balance, `<DbtrAgt>` XML |
+| `npm test` | `MockInferenceRunner` + HTTP/SSE + Unit | `9` suites / `34` tests | Full concurrent E2E & stream | Deterministic pass | `inventedNumbersLeaked = 0`, session isolation, L1 IBAN/vendor/kind/citation binding, IBAN mod-97, immutable `SourceStore`, post-HITL staleness, refund balance, `<DbtrAgt>` XML |
 | `npm run proof` | `MockInferenceRunner` (fixed pack) | `12/12` invoices | `18` peak concurrent, `22/22` finished | `10` | `1` CAS conflict stopped, `1` L1 blocked, `1` `STALE`, `1` HITL, `0` leaked |
 | `npm start` (`3×` runs, `0f1046d`) | Live `deepseek-chat` (fixed pack) | `36/36` GT invoices (`3×12`) | `21` max peak, `66/66` finished | Deterministic path + `1` CAS each | `3/3` CAS stopped (`INV-1011`), `3/3` `STALE` (`INV-1007`), `3/3` BEC HITL rejected (`REQ-3002`), `0` leaked |
 | `npm start -- --stream --ticks 80` | Live `deepseek-chat`, seed `2811646950` | `80` ticks (`26` traps), `83/83` invoices closed | `12` peak concurrent, `99/99` finished | `74` | Live L1 catch `REJ-2` (`$28,865.00` vs `$288.65` on `TX-5013`), `10` HITL, `2` `STALE`, `0` leaked |

@@ -151,4 +151,46 @@ describe("HTTP & SSE Server API interactive flow", () => {
 			(s) => s.status === "COMPLETED",
 		)
 	})
+
+	it("enforces optional LEDGERPROOF_API_TOKEN while keeping /api/health accessible", async () => {
+		const secured = createLedgerServer(undefined, undefined, "secret-token-123")
+		let secUrl = ""
+		await new Promise<void>((resolve) => {
+			secured.server.listen(0, "127.0.0.1", () => {
+				const addr = secured.server.address() as AddressInfo
+				secUrl = `http://127.0.0.1:${addr.port}`
+				resolve()
+			})
+		})
+
+		try {
+			const healthRes = await fetch(`${secUrl}/api/health`)
+			expect(healthRes.status).toBe(200)
+
+			const unauthState = await fetch(`${secUrl}/api/state`)
+			expect(unauthState.status).toBe(401)
+
+			const wrongRun = await fetch(`${secUrl}/api/run`, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: "Bearer wrong-token",
+				},
+				body: JSON.stringify({ mode: "mock" }),
+			})
+			expect(wrongRun.status).toBe(401)
+
+			const authState = await fetch(`${secUrl}/api/state`, {
+				headers: { Authorization: "Bearer secret-token-123" },
+			})
+			expect(authState.status).toBe(200)
+
+			const queryTokenState = await fetch(`${secUrl}/api/state?token=secret-token-123`)
+			expect(queryTokenState.status).toBe(200)
+		} finally {
+			await new Promise<void>((resolve, reject) => {
+				secured.server.close((err) => (err ? reject(err) : resolve()))
+			})
+		}
+	})
 })
