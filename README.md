@@ -14,8 +14,8 @@
 
 > **Compliance Notice:** LedgerProof uses **100% synthetic financial data** for demonstration only. Output is **not financial advice**.
 
-[![Watch LedgerProof Full-HD Demo Video (1:49 · 1080p with Voiceover)](docs/assets/ledgerproof-demo-poster.png)](https://github.com/Gruya13/ledgerproof/releases/download/demo-v1/ledgerproof-demo-final.mp4)
-*▶ **[Watch Full-HD Demo Video (`1080p`, 1:49, English Voiceover)](https://github.com/Gruya13/ledgerproof/releases/download/demo-v1/ledgerproof-demo-final.mp4)** · [English Subtitles (`.srt`)](https://github.com/Gruya13/ledgerproof/releases/download/demo-v1/subtitles-en.srt) — Obsidian Treasury UI, concurrent Mozaik swimlanes, ProofGate L1/L2/L3 catches, Continuous Chaos Stream, CLI proof, and 10×60 live DeepSeek sweep.*
+[![Watch LedgerProof Full-HD Demo Video on YouTube (1:49 · 1080p)](docs/assets/ledgerproof-demo-poster.png)](https://youtu.be/jKKM3JEUcjk)
+*▶ **[Watch Full-HD Demo Video on YouTube (`1080p`, 1:49, English Voiceover)](https://youtu.be/jKKM3JEUcjk)** — Obsidian Treasury UI, concurrent Mozaik swimlanes, ProofGate L1/L2/L3 catches, Continuous Chaos Stream, CLI proof, and 10×60 live DeepSeek sweep.*
 
 ---
 
