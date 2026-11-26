@@ -136,6 +136,7 @@ export function createReconcilerAgent(rt: LedgerRuntimeApi, modelName: string): 
 				rt.sendEvent(
 					SemanticEvent.create("invoice.partial", selfId, {
 						invoiceId: args.invoiceId,
+						partialTxId: txIds[0],
 						paidCents: casRes.value.paidAmountCents,
 						remainingCents: inv.amountCents - casRes.value.paidAmountCents,
 						expectedVersion: casRes.version,
@@ -160,6 +161,11 @@ export function createReconcilerAgent(rt: LedgerRuntimeApi, modelName: string): 
 			const state = rt.resolveRuntime().state
 			const payload = context.event.payload as { transaction: BankTransaction; reason: string }
 			const tx = payload.transaction
+
+			if (!state.canStartLlmLoop()) {
+				state.logAudit("budget.paused", "Reconciler", tx.sourceId, { llmCalls: state.metrics.llmCalls })
+				return
+			}
 
 			state.metrics.llmCalls += 1
 			const spanId = state.beginLoop("Reconciler", context.event.type, tx.sourceId)

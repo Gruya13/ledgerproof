@@ -1,0 +1,445 @@
+import type { BankTransaction, Invoice, PaymentRequest, Vendor } from "../types"
+
+export type TrapKind =
+	| "split_typo"
+	| "partial_late_stale"
+	| "duplicate_invoice"
+	| "orphan_wire"
+	| "bec_iban_change"
+	| "write_skew_race"
+
+export const ALL_TRAP_KINDS: TrapKind[] = [
+	"split_typo",
+	"partial_late_stale",
+	"duplicate_invoice",
+	"orphan_wire",
+	"bec_iban_change",
+	"write_skew_race",
+]
+
+export interface StreamTickBatch {
+	tickNumber: number
+	trapKind: TrapKind | null
+	label: string
+	invoices: Invoice[]
+	transactions: BankTransaction[]
+	delayedTransactions: BankTransaction[]
+	requests: PaymentRequest[]
+	concurrentFraudAlerts: BankTransaction[]
+}
+
+/**
+ * Generates realistic continuous Black Friday financial traffic (invoices, payments, SEPA drafts)
+ * starting at INV-2001 / TX-5001 / REQ-6001, periodically injecting one of 6 intentional traps.
+ */
+export class ContinuousStreamGenerator {
+	private invSeq = 2000
+	private txSeq = 5000
+	private reqSeq = 6000
+	private poSeq = 8000
+	private tickSeq = 0
+	private trapCursor = 0
+
+	constructor(private readonly vendors: Vendor[]) {}
+
+	private nextInvId(): string {
+		return `INV-${++this.invSeq}`
+	}
+
+	private nextTxId(): string {
+		return `TX-${++this.txSeq}`
+	}
+
+	private nextReqId(): string {
+		return `REQ-${++this.reqSeq}`
+	}
+
+	private nextPo(): string {
+		return `PO-${++this.poSeq}`
+	}
+
+	private pickVendor(offset = 0): Vendor {
+		return this.vendors[(this.tickSeq + offset) % this.vendors.length]
+	}
+
+	nextTick(opts: { forceTrap?: TrapKind; trapCadence?: number } = {}): StreamTickBatch {
+		this.tickSeq += 1
+		const cadence = Math.max(2, opts.trapCadence ?? 3)
+		const trapKind =
+			opts.forceTrap ?? (this.tickSeq % cadence === 0 ? ALL_TRAP_KINDS[this.trapCursor++ % ALL_TRAP_KINDS.length] : null)
+
+		if (!trapKind) {
+			return this.buildCleanTick()
+		}
+
+		switch (trapKind) {
+			case "split_typo":
+				return this.buildSplitTypoTrap()
+			case "partial_late_stale":
+				return this.buildPartialLateStaleTrap()
+			case "duplicate_invoice":
+				return this.buildDuplicateInvoiceTrap()
+			case "orphan_wire":
+				return this.buildOrphanWireTrap()
+			case "bec_iban_change":
+				return this.buildBecIbanChangeTrap()
+			case "write_skew_race":
+				return this.buildWriteSkewRaceTrap()
+		}
+	}
+
+	private buildCleanTick(): StreamTickBatch {
+		const vendor = this.pickVendor()
+		const invId = this.nextInvId()
+		const txId = this.nextTxId()
+		const amountCents = 8500 + ((this.tickSeq * 1350) % 14000) // stays <= $250 for clean auto SEPA checks
+		const inv: Invoice = {
+			sourceId: invId,
+			vendorId: vendor.sourceId,
+			poNumber: this.nextPo(),
+			amountCents,
+			currency: "USD",
+			issuedAt: "2026-11-26",
+			dueDate: "2026-12-05",
+			description: `Stream Black Friday batch item #${this.tickSeq}`,
+		}
+		const tx: BankTransaction = {
+			sourceId: txId,
+			kind: "bank_transfer",
+			reference: invId,
+			vendorId: vendor.sourceId,
+			amountCents,
+			currency: "USD",
+			bookedAt: "2026-11-26",
+			memo: `Auto-settled ${invId} ${vendor.name}`,
+			late: false,
+		}
+
+		// Every 4th clean tick also creates a routine <= $250 SEPA draft to prove controlled auto-approval
+		const requests: PaymentRequest[] = []
+		if (this.tickSeq % 4 === 1) {
+			requests.push({
+				sourceId: this.nextReqId(),
+				kind: "sepa_payout",
+				invoiceId: invId,
+				vendorId: vendor.sourceId,
+				amountCents,
+				currency: "USD",
+				targetIban: vendor.masterIban,
+				requestedBy: "ap-automation",
+				reason: "Routine Black Friday vendor payout within limit",
+				concurrentWithAlert: false,
+			})
+		}
+
+		return {
+			tickNumber: this.tickSeq,
+			trapKind: null,
+			label: `Clean settlement ${invId} ⇄ ${txId} ($${(amountCents / 100).toFixed(2)})`,
+			invoices: [inv],
+			transactions: [tx],
+			delayedTransactions: [],
+			requests,
+			concurrentFraudAlerts: [],
+		}
+	}
+
+	private buildSplitTypoTrap(): StreamTickBatch {
+		const vendor = this.pickVendor(1)
+		const invId = this.nextInvId()
+		const part1 = 42000
+		const part2 = 28000
+		const total = part1 + part2
+		const typoRef = invId.replace(/0/, "O")
+
+		const inv: Invoice = {
+			sourceId: invId,
+			vendorId: vendor.sourceId,
+			poNumber: this.nextPo(),
+			amountCents: total,
+			currency: "USD",
+			issuedAt: "2026-11-26",
+			dueDate: "2026-12-02",
+			description: `Split shipment allocation (${invId})`,
+		}
+		const tx1: BankTransaction = {
+			sourceId: this.nextTxId(),
+			kind: "bank_transfer",
+			reference: `SPLIT-A-${invId}`,
+			vendorId: vendor.sourceId,
+			amountCents: part1,
+			currency: "USD",
+			bookedAt: "2026-11-26",
+			memo: `BF tranche 1 ${typoRef}`,
+			late: false,
+		}
+		const tx2: BankTransaction = {
+			sourceId: this.nextTxId(),
+			kind: "bank_transfer",
+			reference: `SPLIT-B-${invId}`,
+			vendorId: vendor.sourceId,
+			amountCents: part2,
+			currency: "USD",
+			bookedAt: "2026-11-26",
+			memo: `BF tranche 2 ${typoRef}`,
+			late: false,
+		}
+
+		return {
+			tickNumber: this.tickSeq,
+			trapKind: "split_typo",
+			label: `TRAP [Split + Typo]: ${invId} ($${(total / 100).toFixed(2)}) via ${tx1.sourceId}+${tx2.sourceId}`,
+			invoices: [inv],
+			transactions: [tx1, tx2],
+			delayedTransactions: [],
+			requests: [],
+			concurrentFraudAlerts: [],
+		}
+	}
+
+	private buildPartialLateStaleTrap(): StreamTickBatch {
+		const vendor = this.pickVendor(2)
+		const invId = this.nextInvId()
+		const invNum = invId.split("-")[1]
+		const paidNow = 35000
+		const lateAmount = 25000
+		const total = paidNow + lateAmount
+
+		const inv: Invoice = {
+			sourceId: invId,
+			vendorId: vendor.sourceId,
+			poNumber: this.nextPo(),
+			amountCents: total,
+			currency: "USD",
+			issuedAt: "2026-11-25",
+			dueDate: "2026-11-26",
+			description: `Partial + delayed clearing test (${invId})`,
+		}
+		const txPartial: BankTransaction = {
+			sourceId: this.nextTxId(),
+			kind: "bank_transfer",
+			reference: `PARTIAL-${invNum}`,
+			vendorId: vendor.sourceId,
+			amountCents: paidNow,
+			currency: "USD",
+			bookedAt: "2026-11-26",
+			memo: `Partial payment 1 for ${invId}`,
+			late: false,
+		}
+		const txLate: BankTransaction = {
+			sourceId: this.nextTxId(),
+			kind: "bank_transfer",
+			reference: invId,
+			vendorId: vendor.sourceId,
+			amountCents: lateAmount,
+			currency: "USD",
+			bookedAt: "2026-11-27",
+			memo: `Late clearing tranche for ${invId}`,
+			late: true,
+		}
+
+		return {
+			tickNumber: this.tickSeq,
+			trapKind: "partial_late_stale",
+			label: `TRAP [Partial -> Late STALE]: ${invId} ($${(total / 100).toFixed(2)}), late ${txLate.sourceId} queued`,
+			invoices: [inv],
+			transactions: [txPartial],
+			delayedTransactions: [txLate],
+			requests: [],
+			concurrentFraudAlerts: [],
+		}
+	}
+
+	private buildDuplicateInvoiceTrap(): StreamTickBatch {
+		const vendor = this.pickVendor(3)
+		const po = this.nextPo()
+		const amountCents = 49000
+		const invOrig: Invoice = {
+			sourceId: this.nextInvId(),
+			vendorId: vendor.sourceId,
+			poNumber: po,
+			amountCents,
+			currency: "USD",
+			issuedAt: "2026-11-25",
+			dueDate: "2026-12-04",
+			description: `Original vendor invoice (${po})`,
+		}
+		const invDup: Invoice = {
+			sourceId: this.nextInvId(),
+			vendorId: vendor.sourceId,
+			poNumber: po,
+			amountCents,
+			currency: "USD",
+			issuedAt: "2026-11-26",
+			dueDate: "2026-12-04",
+			description: `Duplicate re-submission (${po})`,
+		}
+		const txOrig: BankTransaction = {
+			sourceId: this.nextTxId(),
+			kind: "bank_transfer",
+			reference: invOrig.sourceId,
+			vendorId: vendor.sourceId,
+			amountCents,
+			currency: "USD",
+			bookedAt: "2026-11-26",
+			memo: `Payment ${invOrig.sourceId} ${po}`,
+			late: false,
+		}
+
+		return {
+			tickNumber: this.tickSeq,
+			trapKind: "duplicate_invoice",
+			label: `TRAP [Duplicate Invoice]: ${invDup.sourceId} duplicates ${invOrig.sourceId} (${po})`,
+			invoices: [invOrig, invDup],
+			transactions: [txOrig],
+			delayedTransactions: [],
+			requests: [],
+			concurrentFraudAlerts: [],
+		}
+	}
+
+	private buildOrphanWireTrap(): StreamTickBatch {
+		const amountCents = 17425 + ((this.tickSeq * 500) % 9000)
+		const txOrphan: BankTransaction = {
+			sourceId: this.nextTxId(),
+			kind: "wire",
+			reference: `UNREF-${this.txSeq}`,
+			vendorId: null,
+			amountCents,
+			currency: "USD",
+			bookedAt: "2026-11-26",
+			memo: `UNREF WIRE #${this.txSeq} missing invoice reference`,
+			late: false,
+		}
+
+		return {
+			tickNumber: this.tickSeq,
+			trapKind: "orphan_wire",
+			label: `TRAP [Orphan Wire]: ${txOrphan.sourceId} ($${(amountCents / 100).toFixed(2)})`,
+			invoices: [],
+			transactions: [txOrphan],
+			delayedTransactions: [],
+			requests: [],
+			concurrentFraudAlerts: [],
+		}
+	}
+
+	private buildBecIbanChangeTrap(): StreamTickBatch {
+		const vendor = this.pickVendor(4)
+		const invId = this.nextInvId()
+		const txId = this.nextTxId()
+		const reqId = this.nextReqId()
+		const amountCents = 58000
+		const spoofedIban = `${vendor.country}9900008877665544`
+
+		const inv: Invoice = {
+			sourceId: invId,
+			vendorId: vendor.sourceId,
+			poNumber: this.nextPo(),
+			amountCents,
+			currency: "USD",
+			issuedAt: "2026-11-26",
+			dueDate: "2026-12-01",
+			description: `High-value hardware batch (${invId})`,
+		}
+		const tx: BankTransaction = {
+			sourceId: txId,
+			kind: "card_capture",
+			reference: invId,
+			vendorId: vendor.sourceId,
+			amountCents,
+			currency: "USD",
+			bookedAt: "2026-11-26",
+			memo: `Gateway capture ${invId}`,
+			late: false,
+		}
+		const req: PaymentRequest = {
+			sourceId: reqId,
+			kind: "sepa_payout",
+			invoiceId: invId,
+			vendorId: vendor.sourceId,
+			amountCents,
+			currency: "USD",
+			targetIban: spoofedIban,
+			requestedBy: "spoofed-vendor-mail@example.invalid",
+			reason: "Urgent Black Friday bank account override",
+			concurrentWithAlert: false,
+		}
+
+		return {
+			tickNumber: this.tickSeq,
+			trapKind: "bec_iban_change",
+			label: `TRAP [BEC IBAN HITL]: ${reqId} on ${invId} ($${(amountCents / 100).toFixed(2)})`,
+			invoices: [inv],
+			transactions: [tx],
+			delayedTransactions: [],
+			requests: [req],
+			concurrentFraudAlerts: [],
+		}
+	}
+
+	private buildWriteSkewRaceTrap(): StreamTickBatch {
+		const vendor = this.pickVendor(5)
+		const invId = this.nextInvId()
+		const txCaptureId = this.nextTxId()
+		const reqId = this.nextReqId()
+		const alertTxId = this.nextTxId()
+		const amountCents = 34000
+
+		const inv: Invoice = {
+			sourceId: invId,
+			vendorId: vendor.sourceId,
+			poNumber: this.nextPo(),
+			amountCents,
+			currency: "USD",
+			issuedAt: "2026-11-26",
+			dueDate: "2026-12-01",
+			description: `Black Friday bundle under concurrent race (${invId})`,
+		}
+		const txCapture: BankTransaction = {
+			sourceId: txCaptureId,
+			kind: "card_capture",
+			reference: invId,
+			vendorId: vendor.sourceId,
+			amountCents,
+			currency: "USD",
+			bookedAt: "2026-11-26",
+			memo: `Initial capture ${invId}`,
+			late: false,
+		}
+		const reqRefund: PaymentRequest = {
+			sourceId: reqId,
+			kind: "refund",
+			invoiceId: invId,
+			vendorId: vendor.sourceId,
+			amountCents,
+			currency: "USD",
+			targetIban: null,
+			requestedBy: "customer-portal",
+			reason: "Immediate Black Friday refund request",
+			concurrentWithAlert: true,
+		}
+		const fraudAlert: BankTransaction = {
+			sourceId: alertTxId,
+			kind: "fraud_alert",
+			reference: invId,
+			vendorId: vendor.sourceId,
+			amountCents,
+			currency: "USD",
+			bookedAt: "2026-11-26",
+			memo: `VELOCITY ALERT: mismatched BIN retries on ${invId}`,
+			late: false,
+		}
+
+		return {
+			tickNumber: this.tickSeq,
+			trapKind: "write_skew_race",
+			label: `TRAP [CAS Write-Skew + L1]: ${reqId} vs ${alertTxId} on ${invId}`,
+			invoices: [inv],
+			transactions: [txCapture],
+			delayedTransactions: [],
+			requests: [reqRefund],
+			concurrentFraudAlerts: [fraudAlert],
+		}
+	}
+}

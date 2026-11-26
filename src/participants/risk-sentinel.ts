@@ -152,6 +152,11 @@ export function createRiskSentinelAgent(rt: LedgerRuntimeApi, modelName: string)
 
 			if (!shouldInvokeLlm) return
 
+			if (!state.canStartLlmLoop()) {
+				state.logAudit("budget.paused", "RiskSentinel", targetId, { llmCalls: state.metrics.llmCalls })
+				return
+			}
+
 			state.metrics.llmCalls += 1
 			const spanId = state.beginLoop("RiskSentinel", context.event.type, targetId)
 			const freshContext = ModelContext.create().addContextItem(

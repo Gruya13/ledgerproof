@@ -28,6 +28,7 @@ export function App() {
 	const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null)
 	const [mode, setMode] = useState<"mock" | "live">("mock")
 	const [tab, setTab] = useState<"ledger" | "rejected" | "claims">("ledger")
+	const [trapKind, setTrapKind] = useState<string>("")
 	const [actionError, setActionError] = useState<string | null>(null)
 	const [selectedSource, setSelectedSource] = useState<SourceInspectPayload | null>(null)
 	const [sourceLoading, setSourceLoading] = useState(false)
@@ -119,6 +120,19 @@ export function App() {
 		const data = (await res.json()) as { ok: boolean; error?: string }
 		if (!res.ok || !data.ok) {
 			setActionError(data.error ?? "Failed to inject late settlement")
+		}
+	}
+
+	async function callStreamApi(endpoint: string, body?: Record<string, unknown>) {
+		setActionError(null)
+		const res = await fetch(endpoint, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(body ?? {}),
+		})
+		const data = (await res.json()) as { ok: boolean; error?: string }
+		if (!res.ok || !data.ok) {
+			setActionError(data.error ?? `Stream action ${endpoint} failed`)
 		}
 	}
 
@@ -223,6 +237,76 @@ export function App() {
 			</header>
 
 			{actionError && <div className="error-banner">{actionError}</div>}
+
+			<section className="stream-bar">
+				<div className="stream-group">
+					<strong style={{ fontSize: 13, color: "#7dd3fc" }}>Continuous Chaos Stream:</strong>
+					<button
+						type="button"
+						className="btn btn-primary"
+						onClick={() => void callStreamApi("/api/stream/start", { mode, intervalMs: 1500, trapCadence: 3 })}
+					>
+						Start Continuous Stream
+					</button>
+					{snapshot?.stream.running && (
+						<>
+							<button
+								type="button"
+								className="btn"
+								onClick={() =>
+									void callStreamApi(snapshot.stream.paused ? "/api/stream/resume" : "/api/stream/pause")
+								}
+							>
+								{snapshot.stream.paused ? "Resume" : "Pause"}
+							</button>
+							<button
+								type="button"
+								className="btn btn-danger"
+								onClick={() => void callStreamApi("/api/stream/stop")}
+							>
+								Stop
+							</button>
+						</>
+					)}
+					<select
+						className="select-input"
+						value={trapKind}
+						onChange={(e) => setTrapKind(e.target.value)}
+						aria-label="Select trap kind"
+					>
+						<option value="">Next Scheduled Trap (Cycle)</option>
+						<option value="split_typo">Split Payment + Memo Typo</option>
+						<option value="partial_late_stale">Partial -&gt; Late Settlement (STALE)</option>
+						<option value="duplicate_invoice">Duplicate Invoice</option>
+						<option value="orphan_wire">Orphan Bank Wire</option>
+						<option value="bec_iban_change">BEC IBAN Change (HITL)</option>
+						<option value="write_skew_race">Write-Skew Race + L1 Trap</option>
+					</select>
+					<button
+						type="button"
+						className="btn btn-amber"
+						disabled={!snapshot?.stream.active}
+						onClick={() =>
+							void callStreamApi("/api/stream/inject-trap", trapKind ? { kind: trapKind } : {})
+						}
+					>
+						Inject Trap Now
+					</button>
+				</div>
+
+				<div className="stream-group mono" style={{ fontSize: 12, color: "var(--muted)" }}>
+					<span>
+						Ticks: <strong>{snapshot?.stream.tickCount ?? 0}</strong> · Traps:{" "}
+						<strong>{snapshot?.stream.trapsInjected ?? 0}</strong> · Ledger:{" "}
+						<strong>{snapshot?.totalCellsCount ?? snapshot?.cells.length ?? 0}</strong>
+					</span>
+					{snapshot?.maxLlmCalls !== null && snapshot?.maxLlmCalls !== undefined && (
+						<span className={snapshot.llmBudgetExhausted ? "badge badge-risk" : "badge badge-sepa"}>
+							LLM Budget: {m?.llmCalls ?? 0}/{snapshot.maxLlmCalls}
+						</span>
+					)}
+				</div>
+			</section>
 
 			<section className="kpi-grid">
 				<div className="kpi-card">

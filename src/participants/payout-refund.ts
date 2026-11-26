@@ -240,6 +240,7 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 			} else if (context.event.type === "invoice.partial") {
 				const p = context.event.payload as {
 					invoiceId: string
+					partialTxId?: string
 					paidCents: number
 					remainingCents: number
 					expectedVersion: number
@@ -248,11 +249,17 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 				promptJson = {
 					...p,
 					invoice: state.sourceStore.getInvoice(p.invoiceId),
+					partialTransaction: p.partialTxId ? state.sourceStore.getTransaction(p.partialTxId) : undefined,
 				}
 			} else if (context.event.type === "claim.staled") {
 				const p = context.event.payload as { invoiceId: string; txId: string; staledCount: number }
 				targetId = p.invoiceId
 				promptJson = p
+			}
+
+			if (!state.canStartLlmLoop()) {
+				state.logAudit("budget.paused", "PayoutAndRefund", targetId, { llmCalls: state.metrics.llmCalls })
+				return
 			}
 
 			state.metrics.llmCalls += 1
@@ -298,7 +305,7 @@ export function createPayoutAndRefundAgent(rt: LedgerRuntimeApi, modelName: stri
 			"1. On request.arrived with kind='sepa_payout', call propose_sepa_payout with exact amountCents, targetIban, expectedVersion, and citations for the request and invoice.",
 			"2. On request.arrived with kind='refund', call propose_refund with exact amountCents, expectedVersion, and citations for the request and invoice.",
 			"3. On invoice.partial, call draft_overdue_chase using remainingCents as amountCents, expectedVersion as basedOnVersion, and cite the invoice amountCents.",
-			"4. On claim.staled, do NOT call any tool — simply confirm chase draft cancellation citing [src:INV-1007].",
+			"4. On claim.staled, do NOT call any tool — simply confirm chase draft cancellation citing [src:<invoiceId>].",
 			"5. Never invent amounts. In your final text reply, include [src:ID] tags for every invoice/request/amount mentioned.",
 		].join("\n"),
 		tools: [proposeSepaPayoutTool, proposeRefundTool, draftOverdueChaseTool],

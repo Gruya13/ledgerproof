@@ -2,6 +2,11 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { createInterface } from "node:readline/promises"
 import { runBlackFridayScenario } from "./runner-setup"
+import { SessionController } from "./session-controller"
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((r) => setTimeout(r, ms))
+}
 
 async function interactiveApprovalPrompt(question: string): Promise<boolean> {
 	const rl = createInterface({ input: process.stdin, output: process.stdout })
@@ -17,7 +22,77 @@ async function interactiveApprovalPrompt(question: string): Promise<boolean> {
 	}
 }
 
+async function runContinuousCliDemo(maxTicks: number): Promise<void> {
+	console.log("============================================================")
+	console.log(`  LedgerProof — Continuous Chaos Stream CLI (${maxTicks} ticks)`)
+	console.log("  Mode: Offline MockInferenceRunner (0 API keys required)")
+	console.log("  Disclaimer: Synthetic data only. Not financial advice.")
+	console.log("============================================================\n")
+
+	const controller = new SessionController()
+	let seenLogs = 0
+	const unsub = controller.subscribe(() => {
+		const snap = controller.getSnapshot()
+		while (seenLogs < snap.logs.length) {
+			console.log(snap.logs[seenLogs].text)
+			seenLogs += 1
+		}
+	})
+
+	const res = controller.startContinuousStream({
+		mode: "mock",
+		intervalMs: 180,
+		trapCadence: 2,
+		autoApprovePolicy: true,
+		lateDelayMs: 280,
+	})
+	if (!res.ok) {
+		throw new Error(res.error)
+	}
+
+	const deadline = Date.now() + 15000
+	while (Date.now() < deadline) {
+		const snap = controller.getSnapshot()
+		if (snap.stream.tickCount >= maxTicks) break
+		await sleep(50)
+	}
+
+	controller.stopContinuousStream()
+	await sleep(350)
+	await controller.waitForCurrentIdle(10000)
+	unsub()
+
+	const finalSnap = controller.getSnapshot()
+	console.log("\n=== CONTINUOUS STREAM SUMMARY ===")
+	console.log(
+		JSON.stringify(
+			{
+				ticks: finalSnap.stream.tickCount,
+				trapsInjected: finalSnap.stream.trapsInjected,
+				totalInvoices: finalSnap.totalCellsCount,
+				peakConcurrentLoops: finalSnap.metrics.peakConcurrentLoops,
+				deterministicMatches: finalSnap.metrics.deterministicMatches,
+				casConflictsPrevented: finalSnap.metrics.casConflictsPrevented,
+				uncitedNumbersBlocked: finalSnap.metrics.uncitedNumbersBlocked,
+				inventedNumbersLeaked: finalSnap.metrics.inventedNumbersLeaked,
+				staleInvalidations: finalSnap.metrics.staleInvalidations,
+				humanApprovalsRouted: finalSnap.metrics.humanApprovalsRouted,
+			},
+			null,
+			2,
+		),
+	)
+}
+
 async function main(): Promise<void> {
+	if (process.argv.includes("--stream")) {
+		const ticksIdx = process.argv.indexOf("--ticks")
+		const ticksVal = ticksIdx >= 0 ? Number(process.argv[ticksIdx + 1]) : 6
+		const maxTicks = Number.isFinite(ticksVal) && ticksVal > 0 ? ticksVal : 6
+		await runContinuousCliDemo(maxTicks)
+		return
+	}
+
 	const autoMode = process.argv.includes("--auto") || !process.stdin.isTTY
 
 	console.log("============================================================")

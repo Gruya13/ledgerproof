@@ -3,6 +3,7 @@ import { existsSync, readFileSync, statSync } from "node:fs"
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { extname, resolve, sep } from "node:path"
 import { resolveLiveProviderFromEnv } from "./engine/provider-factory"
+import type { TrapKind } from "./engine/stream-generator"
 import { SessionController } from "./session-controller"
 
 const MIME_TYPES: Record<string, string> = {
@@ -135,6 +136,47 @@ export function createLedgerServer(
 				return
 			}
 
+			if (method === "POST" && path === "/api/stream/start") {
+				const body = await readJsonBody(req)
+				const result = controller.startContinuousStream({
+					mode: body.mode === "live" ? "live" : "mock",
+					intervalMs: typeof body.intervalMs === "number" ? body.intervalMs : undefined,
+					trapCadence: typeof body.trapCadence === "number" ? body.trapCadence : undefined,
+					autoApprovePolicy:
+						typeof body.autoApprovePolicy === "boolean" ? body.autoApprovePolicy : false,
+					maxLlmCalls: typeof body.maxLlmCalls === "number" ? body.maxLlmCalls : undefined,
+					lateDelayMs: typeof body.lateDelayMs === "number" ? body.lateDelayMs : undefined,
+				})
+				sendJson(res, result.ok ? 200 : 400, result)
+				return
+			}
+
+			if (method === "POST" && path === "/api/stream/pause") {
+				const result = controller.pauseContinuousStream()
+				sendJson(res, result.ok ? 200 : 400, result)
+				return
+			}
+
+			if (method === "POST" && path === "/api/stream/resume") {
+				const result = controller.resumeContinuousStream()
+				sendJson(res, result.ok ? 200 : 400, result)
+				return
+			}
+
+			if (method === "POST" && path === "/api/stream/stop") {
+				const result = controller.stopContinuousStream()
+				sendJson(res, 200, result)
+				return
+			}
+
+			if (method === "POST" && path === "/api/stream/inject-trap") {
+				const body = await readJsonBody(req)
+				const kind = typeof body.kind === "string" ? (body.kind as TrapKind) : undefined
+				const result = controller.injectStreamTrap(kind)
+				sendJson(res, result.ok ? 200 : 400, result)
+				return
+			}
+
 			if (method === "GET" && path.startsWith("/api/source/")) {
 				const sourceId = decodeURIComponent(path.slice("/api/source/".length))
 				const entity = controller.getSource(sourceId)
@@ -190,6 +232,7 @@ export function createLedgerServer(
 	})
 
 	server.on("close", () => {
+		controller.stopContinuousStream()
 		unsubscribeController()
 		for (const client of sseClients) {
 			if (!client.writableEnded) {

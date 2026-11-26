@@ -105,6 +105,17 @@ export interface SessionSnapshot {
 	manualLateSettlement: boolean
 	lateSettlementInjected: boolean
 	canInjectLateSettlement: boolean
+	totalCellsCount: number
+	maxLlmCalls: number | null
+	llmBudgetExhausted: boolean
+	stream: {
+		active: boolean
+		running: boolean
+		paused: boolean
+		tickCount: number
+		trapsInjected: number
+		intervalMs: number
+	}
 	disclaimer: string
 	spendingLimitCents: number
 	logs: Array<{ id: number; ts: string; text: string }>

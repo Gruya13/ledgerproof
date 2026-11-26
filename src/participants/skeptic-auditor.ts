@@ -95,6 +95,11 @@ export function createSkepticAuditorAgent(rt: LedgerRuntimeApi, modelName: strin
 				return
 			}
 
+			if (!state.canStartLlmLoop()) {
+				state.logAudit("budget.paused", "SkepticAuditor", claim.claimId, { llmCalls: state.metrics.llmCalls })
+				return
+			}
+
 			state.metrics.llmCalls += 1
 			const spanId = state.beginLoop("SkepticAuditor", context.event.type, claim.claimId)
 			const freshContext = ModelContext.create().addContextItem(

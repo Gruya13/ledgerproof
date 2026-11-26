@@ -48,11 +48,18 @@ function extractJsonBlock(prompt: string): Record<string, any> | undefined {
 	}
 }
 
+function extractFuzzyInvoiceId(text: string): string | undefined {
+	const match = text.match(/\bINV-?([0-9O]{3,6})\b/i)
+	if (!match) return undefined
+	return `INV-${match[1].toUpperCase().replace(/O/g, "0")}`
+}
+
 /**
  * Zero-API-key deterministic InferenceRunner implementing Mozaik's InferenceRunner contract.
+ * Generic across both the fixed Black Friday pack and dynamic continuous stream IDs.
  * Introduces realistic async latency so multiple AgentLoops overlap concurrently,
- * and plants the controlled hallucination trap on REQ-3003 / INV-1011 so ProofGate L1+L2
- * interception is exercised end-to-end.
+ * and simulates the controlled L1 hallucination + L2 CAS write-skew trap when
+ * concurrentWithAlert refunds arrive.
  */
 export class MockInferenceRunner implements InferenceRunner {
 	async run(input: InferenceInput): Promise<InferenceOutput> {
@@ -64,7 +71,6 @@ export class MockInferenceRunner implements InferenceRunner {
 		const previousCalls = getToolCalls(input)
 		const previousOutputs = getToolOutputs(input)
 
-		// Varied async delays ensure concurrent AgentLoops genuinely overlap in flight.
 		const delayByRole: Record<string, number> = {
 			Reconciler: 110,
 			PayoutAndRefund: 130,
@@ -80,9 +86,9 @@ export class MockInferenceRunner implements InferenceRunner {
 		} else if (role === "PayoutAndRefund") {
 			items = this.handlePayoutAndRefund(eventTag, payload, previousCalls, previousOutputs)
 		} else if (role === "RiskSentinel") {
-			items = this.handleRiskSentinel(eventTag, payload, previousCalls, previousOutputs)
+			items = this.handleRiskSentinel(eventTag, payload, previousCalls)
 		} else if (role === "SkepticAuditor") {
-			items = this.handleSkepticAuditor(eventTag, payload, previousCalls, previousOutputs)
+			items = this.handleSkepticAuditor(payload, previousCalls)
 		} else {
 			items = [ModelMessageItem.rehydrate({ text: `Mock agent ${role} completed.` })]
 		}
@@ -104,78 +110,94 @@ export class MockInferenceRunner implements InferenceRunner {
 		previousCalls: FunctionCallItem[],
 		previousOutputs: Array<{ callId: string; output: string }>,
 	): InferenceOutput["items"] {
-		if (previousCalls.length === 0) {
-			const tx = payload.transaction as Record<string, any> | undefined
-			const arrivedTransactions = (payload.arrivedTransactions as Array<Record<string, any>> | undefined) ?? []
-			const arrivedInvoices = (payload.arrivedInvoices as Array<Record<string, any>> | undefined) ?? []
+		const tx = payload.transaction as Record<string, any> | undefined
+		const arrivedTransactions = (payload.arrivedTransactions as Array<Record<string, any>> | undefined) ?? []
+		const arrivedInvoices = (payload.arrivedInvoices as Array<Record<string, any>> | undefined) ?? []
 
-			// Split payment case: INV-1006 ($1,200.00) paid by TX-2006 ($700) + TX-2007 ($500) with "INV10O6" typo
-			if (tx?.sourceId === "TX-2006" || tx?.sourceId === "TX-2007") {
-				const splitPair = arrivedTransactions.filter(
-					(t) => t.sourceId === "TX-2006" || t.sourceId === "TX-2007",
-				)
-				const inv1006 = arrivedInvoices.find((i) => i.sourceId === "INV-1006")
-				if (splitPair.length === 2 && inv1006) {
+		if (previousCalls.length === 0 && tx) {
+			// Split payment case: SPLIT-* transactions sharing a normalized memo invoice ID or vendor sum
+			if (typeof tx.reference === "string" && tx.reference.startsWith("SPLIT-")) {
+				const targetInvId = extractFuzzyInvoiceId(String(tx.memo ?? ""))
+				const inv = arrivedInvoices.find((i) => i.sourceId === targetInvId)
+				if (inv) {
+					const splitPeers = arrivedTransactions.filter(
+						(t) =>
+							typeof t.reference === "string" &&
+							t.reference.startsWith("SPLIT-") &&
+							t.vendorId === tx.vendorId &&
+							extractFuzzyInvoiceId(String(t.memo ?? "")) === targetInvId,
+					)
+					const sumCents = splitPeers.reduce((acc, t) => acc + Number(t.amountCents ?? 0), 0)
+					if (splitPeers.length >= 2 && sumCents === Number(inv.amountCents)) {
+						const txIds = splitPeers.map((t) => String(t.sourceId))
+						return [
+							FunctionCallItem.rehydrate({
+								callId: `call-rec-${inv.sourceId}-${Date.now()}`,
+								name: "record_reconciliation",
+								args: JSON.stringify({
+									invoiceId: inv.sourceId,
+									txIds,
+									amountCents: sumCents,
+									matchKind: "SPLIT_MATCH",
+									explanation: `Matched split payments ${txIds.join(" + ")} to ${inv.sourceId} despite memo typo.`,
+									citations: [
+										{ sourceId: inv.sourceId, field: "amountCents", expectedValue: inv.amountCents },
+										...splitPeers.map((t) => ({
+											sourceId: t.sourceId,
+											field: "amountCents",
+											expectedValue: t.amountCents,
+										})),
+									],
+								}),
+							}),
+						]
+					}
+				}
+				return [
+					ModelMessageItem.rehydrate({
+						text: `Holding ${tx.sourceId} ($${(Number(tx.amountCents) / 100).toFixed(2)}) [src:${tx.sourceId}] pending matching split counterpart.`,
+					}),
+				]
+			}
+
+			// Partial payment case: PARTIAL-* tranche referencing an open invoice
+			if (typeof tx.reference === "string" && tx.reference.startsWith("PARTIAL-")) {
+				const refDigits = tx.reference.match(/PARTIAL-(\d+)/i)?.[1]
+				const targetInvId = extractFuzzyInvoiceId(String(tx.memo ?? "")) ?? (refDigits ? `INV-${refDigits}` : undefined)
+				const inv = arrivedInvoices.find((i) => i.sourceId === targetInvId)
+				if (inv) {
 					return [
 						FunctionCallItem.rehydrate({
-							callId: `call-rec-1006-${Date.now()}`,
+							callId: `call-rec-partial-${inv.sourceId}-${Date.now()}`,
 							name: "record_reconciliation",
 							args: JSON.stringify({
-								invoiceId: "INV-1006",
-								txIds: ["TX-2006", "TX-2007"],
-								amountCents: 120000,
-								matchKind: "SPLIT_MATCH",
-								explanation:
-									"Matched split payments TX-2006 ($700.00) + TX-2007 ($500.00) despite memo typo INV10O6.",
+								invoiceId: inv.sourceId,
+								txIds: [tx.sourceId],
+								amountCents: tx.amountCents,
+								matchKind: "PARTIAL_MATCH",
+								explanation: `Partial tranche ${tx.sourceId} ($${(Number(tx.amountCents) / 100).toFixed(2)}) applied to ${inv.sourceId} ($${(Number(inv.amountCents) / 100).toFixed(2)}).`,
 								citations: [
-									{ sourceId: "INV-1006", field: "amountCents", expectedValue: 120000 },
-									{ sourceId: "TX-2006", field: "amountCents", expectedValue: 70000 },
-									{ sourceId: "TX-2007", field: "amountCents", expectedValue: 50000 },
+									{ sourceId: inv.sourceId, field: "amountCents", expectedValue: inv.amountCents },
+									{ sourceId: tx.sourceId, field: "amountCents", expectedValue: tx.amountCents },
 								],
 							}),
 						}),
 					]
 				}
-				return [
-					ModelMessageItem.rehydrate({
-						text: `Holding ${tx.sourceId} ($${(tx.amountCents / 100).toFixed(2)}) [src:${tx.sourceId}] pending matching split counterpart.`,
-					}),
-				]
 			}
 
-			// Partial payment case: TX-2008 ($500) toward INV-1007 ($800)
-			if (tx?.sourceId === "TX-2008") {
+			// Orphan wire case: unreferenced wire without vendor
+			if (tx.kind === "wire" && !tx.vendorId) {
 				return [
 					FunctionCallItem.rehydrate({
-						callId: `call-rec-1007-${Date.now()}`,
+						callId: `call-rec-orphan-${tx.sourceId}-${Date.now()}`,
 						name: "record_reconciliation",
 						args: JSON.stringify({
-							invoiceId: "INV-1007",
-							txIds: ["TX-2008"],
-							amountCents: 50000,
-							matchKind: "PARTIAL_MATCH",
-							explanation: "Partial tranche TX-2008 ($500.00) applied to INV-1007 ($800.00); $300.00 remains open.",
-							citations: [
-								{ sourceId: "INV-1007", field: "amountCents", expectedValue: 80000 },
-								{ sourceId: "TX-2008", field: "amountCents", expectedValue: 50000 },
-							],
-						}),
-					}),
-				]
-			}
-
-			// Orphan wire case: TX-2014 ($189.40)
-			if (tx?.sourceId === "TX-2014") {
-				return [
-					FunctionCallItem.rehydrate({
-						callId: `call-rec-2014-${Date.now()}`,
-						name: "record_reconciliation",
-						args: JSON.stringify({
-							txId: "TX-2014",
-							amountCents: 18940,
+							txId: tx.sourceId,
+							amountCents: tx.amountCents,
 							matchKind: "ORPHAN_TX",
-							explanation: "Unreferenced wire TX-2014 ($189.40) has no matching invoice or vendor.",
-							citations: [{ sourceId: "TX-2014", field: "amountCents", expectedValue: 18940 }],
+							explanation: `Unreferenced wire ${tx.sourceId} ($${(Number(tx.amountCents) / 100).toFixed(2)}) has no matching invoice or vendor.`,
+							citations: [{ sourceId: tx.sourceId, field: "amountCents", expectedValue: tx.amountCents }],
 						}),
 					}),
 				]
@@ -188,30 +210,43 @@ export class MockInferenceRunner implements InferenceRunner {
 			]
 		}
 
-		// After tool output
+		// Final prose summary after tool output
+		const lastCallArgs = (() => {
+			try {
+				return JSON.parse(previousCalls[0]?.args ?? "{}") as Record<string, any>
+			} catch {
+				return {}
+			}
+		})()
+
+		if (lastCallArgs.matchKind === "SPLIT_MATCH" && lastCallArgs.invoiceId) {
+			const txTags = ((lastCallArgs.txIds as string[]) ?? []).map((id) => `[src:${id}]`).join(" + ")
+			return [
+				ModelMessageItem.rehydrate({
+					text: `Confirmed split reconciliation for [src:${lastCallArgs.invoiceId}] ($${(Number(lastCallArgs.amountCents) / 100).toFixed(2)}) across ${txTags}.`,
+				}),
+			]
+		}
+
+		if (lastCallArgs.matchKind === "PARTIAL_MATCH" && lastCallArgs.invoiceId) {
+			const txId = (lastCallArgs.txIds as string[])?.[0] ?? tx?.sourceId ?? ""
+			return [
+				ModelMessageItem.rehydrate({
+					text: `Recorded partial match for [src:${lastCallArgs.invoiceId}] with [src:${txId}] ($${(Number(lastCallArgs.amountCents) / 100).toFixed(2)}).`,
+				}),
+			]
+		}
+
+		if (lastCallArgs.matchKind === "ORPHAN_TX" && lastCallArgs.txId) {
+			return [
+				ModelMessageItem.rehydrate({
+					text: `Flagged orphan wire [src:${lastCallArgs.txId}] ($${(Number(lastCallArgs.amountCents) / 100).toFixed(2)}) as unmatched.`,
+				}),
+			]
+		}
+
 		const lastOut = previousOutputs[previousOutputs.length - 1]?.output ?? ""
-		if (eventTag.includes("TX-2007") || lastOut.includes("INV-1006")) {
-			return [
-				ModelMessageItem.rehydrate({
-					text: "Confirmed split reconciliation for [src:INV-1006] ($1,200.00) across [src:TX-2006] ($700.00) and [src:TX-2007] ($500.00).",
-				}),
-			]
-		}
-		if (lastOut.includes("INV-1007")) {
-			return [
-				ModelMessageItem.rehydrate({
-					text: "Recorded partial match for [src:INV-1007] ($800.00) with [src:TX-2008] ($500.00); $300.00 open.",
-				}),
-			]
-		}
-		if (lastOut.includes("TX-2014")) {
-			return [
-				ModelMessageItem.rehydrate({
-					text: "Flagged orphan wire [src:TX-2014] ($189.40) as unmatched.",
-				}),
-			]
-		}
-		return [ModelMessageItem.rehydrate({ text: "Reconciler step completed." })]
+		return [ModelMessageItem.rehydrate({ text: `Reconciler step completed (${lastOut ? "ok" : "done"}).` })]
 	}
 
 	private handlePayoutAndRefund(
@@ -223,78 +258,98 @@ export class MockInferenceRunner implements InferenceRunner {
 		const req = payload.request as Record<string, any> | undefined
 		const expectedVersion = (payload.expectedVersion as number | undefined) ?? 1
 
-		// Case 3: Partial invoice triggers overdue chase draft; later claim.staled acknowledges cancellation
+		// Partial invoice triggers overdue chase draft; later claim.staled acknowledges cancellation
 		if (eventTag === "invoice.partial") {
+			const invoice = payload.invoice as Record<string, any> | undefined
+			const partialTx = payload.partialTransaction as Record<string, any> | undefined
+			const invoiceId = String(payload.invoiceId ?? invoice?.sourceId ?? "")
+			const remainingCents = Number(payload.remainingCents ?? 0)
+			const citations: Array<Record<string, unknown>> = [
+				{ sourceId: invoiceId, field: "amountCents", expectedValue: Number(invoice?.amountCents ?? 0) },
+			]
+			if (partialTx?.sourceId) {
+				citations.push({
+					sourceId: partialTx.sourceId,
+					field: "amountCents",
+					expectedValue: Number(partialTx.amountCents ?? 0),
+				})
+			}
+
 			if (previousCalls.length === 0) {
 				return [
 					FunctionCallItem.rehydrate({
-						callId: `call-chase-${payload.invoiceId}-${Date.now()}`,
+						callId: `call-chase-${invoiceId}-${Date.now()}`,
 						name: "draft_overdue_chase",
 						args: JSON.stringify({
-							invoiceId: payload.invoiceId,
-							amountCents: payload.remainingCents,
+							invoiceId,
+							amountCents: remainingCents,
 							basedOnVersion: expectedVersion,
-							reason: `Remaining unpaid balance on ${payload.invoiceId}`,
-							citations: [
-								{ sourceId: payload.invoiceId, field: "amountCents", expectedValue: 80000 },
-								{ sourceId: "TX-2008", field: "amountCents", expectedValue: 50000 },
-							],
+							reason: `Remaining unpaid balance on ${invoiceId}`,
+							citations,
 						}),
 					}),
 				]
 			}
+			const partialSuffix = partialTx?.sourceId
+				? ` minus [src:${partialTx.sourceId}] ($${(Number(partialTx.amountCents) / 100).toFixed(2)})`
+				: ""
 			return [
 				ModelMessageItem.rehydrate({
-					text: `Created overdue chase draft for $300.00 on [src:INV-1007] minus [src:TX-2008] ($500.00).`,
+					text: `Created overdue chase draft for $${(remainingCents / 100).toFixed(2)} on [src:${invoiceId}]${partialSuffix}.`,
 				}),
 			]
 		}
 
 		if (eventTag === "claim.staled") {
+			const invoiceId = String(payload.invoiceId ?? "")
+			const txId = String(payload.txId ?? "")
 			return [
 				ModelMessageItem.rehydrate({
-					text: `Acknowledged STALE chase draft on [src:INV-1007] after late settlement [src:TX-2017] ($300.00); chase aborted cleanly.`,
+					text: `Acknowledged STALE chase draft on [src:${invoiceId}] after late settlement [src:${txId}]; chase aborted cleanly.`,
 				}),
 			]
 		}
 
-		// Case 7: Planted hallucination trap + concurrent CAS write-skew on REQ-3003 / INV-1011
-		if (req?.sourceId === "REQ-3003") {
-			if (previousCalls.length === 0) {
-				// Deliberately attempt invented fee ($319.99 = 31999) + bogus TX-9999 so ProofGate L1 blocks it!
+		// Planted hallucination trap + concurrent CAS write-skew on concurrent refund requests
+		if (req?.kind === "refund") {
+			const invoiceId = String(req.invoiceId)
+			const exactCents = Number(req.amountCents)
+			if (previousCalls.length === 0 && req.concurrentWithAlert) {
+				const bogusCents = exactCents + 999
+				// Deliberately attempt invented fee + bogus TX-9999 so ProofGate L1 blocks it!
 				return [
 					FunctionCallItem.rehydrate({
-						callId: `call-req3003-attempt1-${Date.now()}`,
+						callId: `call-refund-attempt1-${req.sourceId}-${Date.now()}`,
 						name: "propose_refund",
 						args: JSON.stringify({
-							requestId: "REQ-3003",
-							invoiceId: "INV-1011",
-							amountCents: 31999,
+							requestId: req.sourceId,
+							invoiceId,
+							amountCents: bogusCents,
 							expectedVersion,
 							reason: "Refund with estimated rush fee",
 							citations: [
-								{ sourceId: "REQ-3003", field: "amountCents", expectedValue: 31000 },
-								{ sourceId: "TX-9999", field: "amountCents", expectedValue: 31999 },
+								{ sourceId: req.sourceId, field: "amountCents", expectedValue: exactCents },
+								{ sourceId: "TX-9999", field: "amountCents", expectedValue: bogusCents },
 							],
 						}),
 					}),
 				]
 			}
-			if (previousCalls.length === 1) {
+			if ((req.concurrentWithAlert && previousCalls.length === 1) || (!req.concurrentWithAlert && previousCalls.length === 0)) {
 				// Retry with exact source numbers & original expectedVersion -> hits ProofGate L2 CAS conflict!
 				return [
 					FunctionCallItem.rehydrate({
-						callId: `call-req3003-attempt2-${Date.now()}`,
+						callId: `call-refund-attempt2-${req.sourceId}-${Date.now()}`,
 						name: "propose_refund",
 						args: JSON.stringify({
-							requestId: "REQ-3003",
-							invoiceId: "INV-1011",
-							amountCents: 31000,
+							requestId: req.sourceId,
+							invoiceId,
+							amountCents: exactCents,
 							expectedVersion,
-							reason: "Retry refund with exact cited amount from REQ-3003",
+							reason: `Retry refund with exact cited amount from ${req.sourceId}`,
 							citations: [
-								{ sourceId: "REQ-3003", field: "amountCents", expectedValue: 31000 },
-								{ sourceId: "INV-1011", field: "amountCents", expectedValue: 31000 },
+								{ sourceId: req.sourceId, field: "amountCents", expectedValue: exactCents },
+								{ sourceId: invoiceId, field: "amountCents", expectedValue: exactCents },
 							],
 						}),
 					}),
@@ -303,12 +358,12 @@ export class MockInferenceRunner implements InferenceRunner {
 			const lastOut = previousOutputs[previousOutputs.length - 1]?.output ?? ""
 			return [
 				ModelMessageItem.rehydrate({
-					text: `Refund for [src:REQ-3003] on [src:INV-1011] ($310.00) halted by ProofGate (${lastOut.includes("WRITE_SKEW") ? "CAS write-skew conflict" : "verification gate"}); escalated for human review.`,
+					text: `Refund for [src:${req.sourceId}] on [src:${invoiceId}] ($${(exactCents / 100).toFixed(2)}) halted by ProofGate (${lastOut.includes("WRITE_SKEW") ? "CAS write-skew conflict" : "verification gate"}); escalated for human review.`,
 				}),
 			]
 		}
 
-		// SEPA Payout drafts (REQ-3001, REQ-3002 BEC IBAN, REQ-3004 controlled auto-approve)
+		// SEPA Payout drafts (auto-approve within limit or BEC IBAN human review)
 		if (req?.kind === "sepa_payout") {
 			if (previousCalls.length === 0) {
 				return [
@@ -335,8 +390,8 @@ export class MockInferenceRunner implements InferenceRunner {
 			return [
 				ModelMessageItem.rehydrate({
 					text: blocked
-						? `SEPA payout [src:${req.sourceId}] for [src:${req.invoiceId}] ($${(req.amountCents / 100).toFixed(2)}) blocked/held by ProofGate.`
-						: `SEPA payout draft [src:${req.sourceId}] for [src:${req.invoiceId}] ($${(req.amountCents / 100).toFixed(2)}) prepared.`,
+						? `SEPA payout [src:${req.sourceId}] for [src:${req.invoiceId}] ($${(Number(req.amountCents) / 100).toFixed(2)}) blocked/held by ProofGate.`
+						: `SEPA payout draft [src:${req.sourceId}] for [src:${req.invoiceId}] ($${(Number(req.amountCents) / 100).toFixed(2)}) prepared.`,
 				}),
 			]
 		}
@@ -348,70 +403,67 @@ export class MockInferenceRunner implements InferenceRunner {
 		eventTag: string,
 		payload: Record<string, any>,
 		previousCalls: FunctionCallItem[],
-		_previousOutputs: Array<{ callId: string; output: string }>,
 	): InferenceOutput["items"] {
-		if (previousCalls.length === 0) {
-			const inv = payload.invoice as Record<string, any> | undefined
-			const tx = payload.transaction as Record<string, any> | undefined
-			const req = payload.request as Record<string, any> | undefined
-			const duplicateOf = payload.duplicateOf as Record<string, any> | undefined
+		const inv = payload.invoice as Record<string, any> | undefined
+		const tx = payload.transaction as Record<string, any> | undefined
+		const req = payload.request as Record<string, any> | undefined
+		const vendor = payload.vendor as Record<string, any> | undefined
+		const duplicateOf = payload.duplicateOf as Record<string, any> | undefined
 
-			// Case 4: Duplicate invoice INV-1009 vs INV-1008
-			if (inv?.sourceId === "INV-1009" && duplicateOf) {
+		if (previousCalls.length === 0) {
+			if (inv && duplicateOf) {
 				return [
 					FunctionCallItem.rehydrate({
-						callId: `call-risk-dup-${Date.now()}`,
+						callId: `call-risk-dup-${inv.sourceId}-${Date.now()}`,
 						name: "flag_risk",
 						args: JSON.stringify({
-							invoiceId: "INV-1009",
+							invoiceId: inv.sourceId,
 							riskFlag: "DUPLICATE_INVOICE",
 							severity: "HIGH",
-							reason: `INV-1009 duplicates INV-1008 (same vendor ${inv.vendorId}, PO ${inv.poNumber}, $450.00).`,
+							reason: `${inv.sourceId} duplicates ${duplicateOf.sourceId} (same vendor ${inv.vendorId}, PO ${inv.poNumber}, $${(Number(inv.amountCents) / 100).toFixed(2)}).`,
 							citations: [
-								{ sourceId: "INV-1009", field: "poNumber", expectedValue: inv.poNumber },
-								{ sourceId: "INV-1008", field: "poNumber", expectedValue: duplicateOf.poNumber },
-								{ sourceId: "INV-1009", field: "amountCents", expectedValue: 45000 },
+								{ sourceId: inv.sourceId, field: "poNumber", expectedValue: inv.poNumber },
+								{ sourceId: duplicateOf.sourceId, field: "poNumber", expectedValue: duplicateOf.poNumber },
+								{ sourceId: inv.sourceId, field: "amountCents", expectedValue: inv.amountCents },
 							],
 						}),
 					}),
 				]
 			}
 
-			// Case 6: BEC vendor IBAN change on REQ-3002 / INV-1010
-			if (req?.sourceId === "REQ-3002") {
-				const vendor = payload.vendor as Record<string, any>
+			if (req && vendor && req.targetIban !== vendor.masterIban) {
 				return [
 					FunctionCallItem.rehydrate({
-						callId: `call-risk-bec-${Date.now()}`,
+						callId: `call-risk-bec-${req.sourceId}-${Date.now()}`,
 						name: "flag_risk",
 						args: JSON.stringify({
-							invoiceId: "INV-1010",
+							invoiceId: req.invoiceId,
 							riskFlag: "BEC_IBAN_CHANGE",
 							severity: "CRITICAL",
-							reason: `REQ-3002 changes IBAN to ${req.targetIban}, mismatching vendor ${vendor.sourceId} master IBAN ${vendor.masterIban}.`,
+							reason: `${req.sourceId} changes IBAN to ${req.targetIban}, mismatching vendor ${vendor.sourceId} master IBAN ${vendor.masterIban}.`,
 							citations: [
-								{ sourceId: "REQ-3002", field: "targetIban", expectedValue: req.targetIban },
-								{ sourceId: "VND-04", field: "masterIban", expectedValue: vendor.masterIban },
+								{ sourceId: req.sourceId, field: "targetIban", expectedValue: req.targetIban },
+								{ sourceId: vendor.sourceId, field: "masterIban", expectedValue: vendor.masterIban },
 							],
 						}),
 					}),
 				]
 			}
 
-			// Case 7: Velocity fraud alert TX-2016 on INV-1011
-			if (tx?.sourceId === "TX-2016") {
+			if (tx?.kind === "fraud_alert") {
+				const invoiceId = String(inv?.sourceId ?? tx.reference)
 				return [
 					FunctionCallItem.rehydrate({
-						callId: `call-risk-fraud-${Date.now()}`,
+						callId: `call-risk-fraud-${tx.sourceId}-${Date.now()}`,
 						name: "flag_risk",
 						args: JSON.stringify({
-							invoiceId: "INV-1011",
+							invoiceId,
 							riskFlag: "FRAUD_VELOCITY",
 							severity: "CRITICAL",
-							reason: `Velocity fraud alert TX-2016 ($310.00) detected on INV-1011; placing immediate HOLD_RISK.`,
+							reason: `Velocity fraud alert ${tx.sourceId} ($${(Number(tx.amountCents) / 100).toFixed(2)}) detected on ${invoiceId}; placing immediate HOLD_RISK.`,
 							citations: [
-								{ sourceId: "TX-2016", field: "amountCents", expectedValue: 31000 },
-								{ sourceId: "INV-1011", field: "amountCents", expectedValue: 31000 },
+								{ sourceId: tx.sourceId, field: "amountCents", expectedValue: tx.amountCents },
+								{ sourceId: invoiceId, field: "amountCents", expectedValue: Number(inv?.amountCents ?? tx.amountCents) },
 							],
 						}),
 					}),
@@ -419,35 +471,34 @@ export class MockInferenceRunner implements InferenceRunner {
 			}
 		}
 
-		if (eventTag.includes("INV-1009")) {
+		if (inv && duplicateOf) {
 			return [
 				ModelMessageItem.rehydrate({
-					text: "Locked duplicate invoice [src:INV-1009] ($450.00), matching [src:INV-1008] ($450.00).",
+					text: `Locked duplicate invoice [src:${inv.sourceId}] ($${(Number(inv.amountCents) / 100).toFixed(2)}), matching [src:${duplicateOf.sourceId}].`,
 				}),
 			]
 		}
-		if (eventTag.includes("REQ-3002")) {
+		if (req && vendor) {
 			return [
 				ModelMessageItem.rehydrate({
-					text: "Flagged BEC IBAN mismatch on [src:REQ-3002] vs master [src:VND-04] for [src:INV-1010] ($640.00).",
+					text: `Flagged BEC IBAN mismatch on [src:${req.sourceId}] vs master [src:${vendor.sourceId}] for [src:${req.invoiceId}] ($${(Number(req.amountCents) / 100).toFixed(2)}).`,
 				}),
 			]
 		}
-		if (eventTag.includes("TX-2016")) {
+		if (tx) {
+			const invoiceId = String(inv?.sourceId ?? tx.reference)
 			return [
 				ModelMessageItem.rehydrate({
-					text: "Placed HOLD_RISK on [src:INV-1011] ($310.00) after fraud alert [src:TX-2016].",
+					text: `Placed HOLD_RISK on [src:${invoiceId}] ($${(Number(tx.amountCents) / 100).toFixed(2)}) after fraud alert [src:${tx.sourceId}].`,
 				}),
 			]
 		}
-		return [ModelMessageItem.rehydrate({ text: "RiskSentinel check completed." })]
+		return [ModelMessageItem.rehydrate({ text: `RiskSentinel check completed (${eventTag}).` })]
 	}
 
 	private handleSkepticAuditor(
-		_eventTag: string,
 		payload: Record<string, any>,
 		previousCalls: FunctionCallItem[],
-		_previousOutputs: Array<{ callId: string; output: string }>,
 	): InferenceOutput["items"] {
 		const claim = payload.claim as Record<string, any> | undefined
 		if (!claim) {
@@ -455,7 +506,11 @@ export class MockInferenceRunner implements InferenceRunner {
 		}
 
 		if (previousCalls.length === 0) {
-			const verdict = claim.kind === "RISK_FLAG" && claim.invoiceId === "INV-1011" ? "NEEDS_HUMAN" : "CONFIRMED"
+			const summary = String(claim.summary ?? "")
+			const verdict =
+				claim.kind === "RISK_FLAG" && summary.toLowerCase().includes("fraud")
+					? "NEEDS_HUMAN"
+					: "CONFIRMED"
 			return [
 				FunctionCallItem.rehydrate({
 					callId: `call-audit-${claim.claimId}-${Date.now()}`,
@@ -470,7 +525,7 @@ export class MockInferenceRunner implements InferenceRunner {
 			]
 		}
 
-		const srcId = claim.invoiceId ?? claim.txId ?? "INV-1001"
+		const srcId = claim.invoiceId ?? claim.txId ?? claim.citations?.[0]?.sourceId ?? "INV-1001"
 		return [
 			ModelMessageItem.rehydrate({
 				text: `Audit verdict recorded for ${claim.claimId} referencing [src:${srcId}].`,

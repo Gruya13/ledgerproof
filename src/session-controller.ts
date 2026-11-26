@@ -1,5 +1,6 @@
 import { SemanticEvent } from "@mozaik-ai/core"
 import { resolveLiveProviderFromEnv, resolveMockProvider } from "./engine/provider-factory"
+import { ALL_TRAP_KINDS, ContinuousStreamGenerator, type TrapKind } from "./engine/stream-generator"
 import { createIngestorParticipant } from "./participants/ingestor"
 import { createObserverParticipant } from "./participants/observer"
 import { createPayoutAndRefundAgent } from "./participants/payout-refund"
@@ -29,6 +30,15 @@ export interface StartRunOptions {
 	staggerMs?: number
 }
 
+export interface StartContinuousStreamOptions {
+	mode?: "mock" | "live"
+	intervalMs?: number
+	trapCadence?: number
+	autoApprovePolicy?: boolean
+	maxLlmCalls?: number
+	lateDelayMs?: number
+}
+
 export interface SessionLogEntry {
 	id: number
 	ts: string
@@ -51,6 +61,19 @@ export class SessionController {
 	private readonly listeners = new Set<() => void>()
 	private readonly pendingApprovalResolvers = new Map<string, (decision: ApprovalDecision) => void>()
 	private unsubscribeState: (() => void) | null = null
+
+	// Continuous stream fields
+	private isContinuousStream = false
+	private streamRunning = false
+	private streamPaused = false
+	private streamTickCount = 0
+	private trapsInjected = 0
+	private streamIntervalMs = 1500
+	private streamTrapCadence = 3
+	private streamLateDelayMs = 3500
+	private streamGenerator: ContinuousStreamGenerator | null = null
+	private streamTimer: NodeJS.Timeout | null = null
+	private readonly pendingTimers = new Set<NodeJS.Timeout>()
 
 	constructor(pack?: BlackFridayPack) {
 		this.pack = pack ?? loadPack()
@@ -86,6 +109,17 @@ export class SessionController {
 		this.emit()
 	}
 
+	private clearAllTimers(): void {
+		if (this.streamTimer) {
+			clearInterval(this.streamTimer)
+			this.streamTimer = null
+		}
+		for (const t of this.pendingTimers) {
+			clearTimeout(t)
+		}
+		this.pendingTimers.clear()
+	}
+
 	private clearPendingResolvers(reason: string): void {
 		for (const [id, resolveFn] of this.pendingApprovalResolvers.entries()) {
 			resolveFn({
@@ -97,33 +131,11 @@ export class SessionController {
 		}
 	}
 
-	startRun(options: StartRunOptions = {}): { ok: true; runId: number } | { ok: false; error: string } {
-		const requestedMode = options.mode ?? "mock"
-		const resolved =
-			requestedMode === "live" ? resolveLiveProviderFromEnv() : resolveMockProvider()
-
-		if (!resolved) {
-			return {
-				ok: false,
-				error:
-					"No live LLM API key found in .env (DEEPSEEK_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY). Switch to Mock Mode or configure .env.",
-			}
-		}
-
-		this.clearPendingResolvers("Superseded by new run")
-		this.unsubscribeState?.()
-
-		const currentRunId = ++this.runId
-		this.mode = resolved.mode
-		this.providerLabel = resolved.label
-		this.manualLateSettlement = options.manualLateSettlement ?? true
-		this.lateSettlementInjected = false
-		this.logs = []
-		this.status = "RUNNING"
-
-		const autoApprovePolicy = options.autoApprovePolicy ?? false
-		const staggerMs = options.staggerMs ?? 90
-
+	private initializeMozaikSession(
+		resolved: NonNullable<ReturnType<typeof resolveLiveProviderFromEnv>> | ReturnType<typeof resolveMockProvider>,
+		autoApprovePolicy: boolean,
+		stateOptions: { seedInvoices?: boolean; maxLlmCalls?: number } = {},
+	): { rt: LedgerRuntimeApi; state: LedgerState; ingestorId: string } {
 		const approvalBroker = new ApprovalBroker(async (approval: PendingApproval) => {
 			if (autoApprovePolicy) {
 				this.pushLog(`[HITL Policy] Auto-rejected ${approval.requestId} (${approval.reason})`)
@@ -145,7 +157,7 @@ export class SessionController {
 		})
 
 		const rt = createLedgerRuntime()
-		const state = new LedgerState(this.pack, approvalBroker)
+		const state = new LedgerState(this.pack, approvalBroker, stateOptions)
 		this.rt = rt
 		this.state = state
 		this.unsubscribeState = state.onChange(() => this.emit())
@@ -173,12 +185,261 @@ export class SessionController {
 		rt.join(riskSentinel)
 		rt.join(skepticAuditor)
 
-		this.ingestorId = ingestor.getId()
+		return { rt, state, ingestorId: ingestor.getId() }
+	}
+
+	startRun(options: StartRunOptions = {}): { ok: true; runId: number } | { ok: false; error: string } {
+		const requestedMode = options.mode ?? "mock"
+		const resolved =
+			requestedMode === "live" ? resolveLiveProviderFromEnv() : resolveMockProvider()
+
+		if (!resolved) {
+			return {
+				ok: false,
+				error:
+					"No live LLM API key found in .env (DEEPSEEK_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY). Switch to Mock Mode or configure .env.",
+			}
+		}
+
+		this.clearAllTimers()
+		this.clearPendingResolvers("Superseded by new run")
+		this.unsubscribeState?.()
+
+		const currentRunId = ++this.runId
+		this.isContinuousStream = false
+		this.streamRunning = false
+		this.streamPaused = false
+		this.streamTickCount = 0
+		this.trapsInjected = 0
+		this.streamGenerator = null
+		this.mode = resolved.mode
+		this.providerLabel = resolved.label
+		this.manualLateSettlement = options.manualLateSettlement ?? true
+		this.lateSettlementInjected = false
+		this.logs = []
+		this.status = "RUNNING"
+
+		const { rt, state, ingestorId } = this.initializeMozaikSession(
+			resolved,
+			options.autoApprovePolicy ?? false,
+			{ seedInvoices: true },
+		)
+		this.ingestorId = ingestorId
+
+		const staggerMs = options.staggerMs ?? 90
 		this.pushLog(`Started Black Friday stream (${resolved.label})`)
 		this.emit()
 
-		void this.executeWaves(currentRunId, rt, state, this.ingestorId, staggerMs)
+		void this.executeWaves(currentRunId, rt, state, ingestorId, staggerMs)
 		return { ok: true, runId: currentRunId }
+	}
+
+	startContinuousStream(
+		options: StartContinuousStreamOptions = {},
+	): { ok: true; runId: number } | { ok: false; error: string } {
+		const requestedMode = options.mode ?? "mock"
+		const resolved =
+			requestedMode === "live" ? resolveLiveProviderFromEnv() : resolveMockProvider()
+
+		if (!resolved) {
+			return {
+				ok: false,
+				error:
+					"No live LLM API key found in .env (DEEPSEEK_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY). Switch to Mock Mode or configure .env.",
+			}
+		}
+
+		this.clearAllTimers()
+		this.clearPendingResolvers("Superseded by continuous stream")
+		this.unsubscribeState?.()
+
+		const currentRunId = ++this.runId
+		this.isContinuousStream = true
+		this.streamRunning = true
+		this.streamPaused = false
+		this.streamTickCount = 0
+		this.trapsInjected = 0
+		this.streamIntervalMs = Math.max(80, options.intervalMs ?? 1500)
+		this.streamTrapCadence = Math.max(2, options.trapCadence ?? 3)
+		this.streamLateDelayMs = Math.max(80, options.lateDelayMs ?? 3500)
+		this.manualLateSettlement = false
+		this.lateSettlementInjected = false
+		this.mode = resolved.mode
+		this.providerLabel = resolved.label
+		this.logs = []
+		this.status = "RUNNING"
+		this.streamGenerator = new ContinuousStreamGenerator(this.pack.vendors)
+
+		const maxLlmCalls =
+			options.maxLlmCalls !== undefined
+				? options.maxLlmCalls
+				: resolved.mode === "live"
+					? 40
+					: undefined
+
+		const { ingestorId } = this.initializeMozaikSession(
+			resolved,
+			options.autoApprovePolicy ?? false,
+			{ seedInvoices: false, maxLlmCalls },
+		)
+		this.ingestorId = ingestorId
+
+		this.pushLog(
+			`Started Continuous Chaos Stream (${resolved.label}, interval=${this.streamIntervalMs}ms, trap every ${this.streamTrapCadence} ticks${maxLlmCalls ? `, maxLlmCalls=${maxLlmCalls}` : ""})`,
+		)
+
+		// Fire initial tick immediately, then schedule interval ticks
+		void this.runStreamTick(currentRunId)
+		this.scheduleStreamInterval(currentRunId)
+		this.emit()
+
+		return { ok: true, runId: currentRunId }
+	}
+
+	private scheduleStreamInterval(expectedRunId: number): void {
+		if (this.streamTimer) {
+			clearInterval(this.streamTimer)
+		}
+		this.streamTimer = setInterval(() => {
+			if (this.runId !== expectedRunId || !this.streamRunning || this.streamPaused) {
+				return
+			}
+			void this.runStreamTick(expectedRunId)
+		}, this.streamIntervalMs)
+	}
+
+	private async runStreamTick(expectedRunId: number, forceTrap?: TrapKind): Promise<void> {
+		if (this.runId !== expectedRunId || !this.rt || !this.streamGenerator) return
+
+		if (this.state.isLlmBudgetExhausted()) {
+			this.streamPaused = true
+			if (this.streamTimer) {
+				clearInterval(this.streamTimer)
+				this.streamTimer = null
+			}
+			this.pushLog(
+				`[Budget Guard] Auto-paused Continuous Stream after reaching ${this.state.metrics.llmCalls}/${this.state.getMaxLlmCalls()} Live LLM calls.`,
+			)
+			this.emit()
+			return
+		}
+
+		const batch = this.streamGenerator.nextTick({
+			forceTrap,
+			trapCadence: this.streamTrapCadence,
+		})
+		this.streamTickCount = batch.tickNumber
+		if (batch.trapKind) {
+			this.trapsInjected += 1
+		}
+		this.pushLog(`[Stream #${batch.tickNumber}] ${batch.label}`)
+
+		const rt = this.rt
+		const state = this.state
+		const ingestorId = this.ingestorId
+
+		for (const inv of batch.invoices) {
+			if (this.runId !== expectedRunId) return
+			state.registerInvoice(inv)
+			rt.sendEvent(SemanticEvent.create("invoice.arrived", ingestorId, { invoice: inv }), ingestorId)
+		}
+
+		for (const tx of batch.transactions) {
+			if (this.runId !== expectedRunId) return
+			state.registerTransaction(tx)
+			rt.sendEvent(SemanticEvent.create("transaction.arrived", ingestorId, { transaction: tx }), ingestorId)
+		}
+
+		if (batch.requests.length > 0 || batch.concurrentFraudAlerts.length > 0) {
+			const timer = setTimeout(() => {
+				this.pendingTimers.delete(timer)
+				if (this.runId !== expectedRunId || !this.rt) return
+
+				for (const req of batch.requests) {
+					state.registerRequest(req)
+					rt.sendEvent(SemanticEvent.create("request.arrived", ingestorId, { request: req }), ingestorId)
+				}
+				for (const alertTx of batch.concurrentFraudAlerts) {
+					state.registerTransaction(alertTx)
+					rt.sendEvent(
+						SemanticEvent.create("transaction.arrived", ingestorId, { transaction: alertTx }),
+						ingestorId,
+					)
+				}
+			}, 20)
+			this.pendingTimers.add(timer)
+		}
+
+		if (batch.delayedTransactions.length > 0) {
+			const timer = setTimeout(() => {
+				this.pendingTimers.delete(timer)
+				if (this.runId !== expectedRunId || !this.rt) return
+				for (const lateTx of batch.delayedTransactions) {
+					state.registerTransaction(lateTx)
+					this.pushLog(`[Stream Late] Injecting ${lateTx.sourceId} for ${lateTx.reference}`)
+					rt.sendEvent(
+						SemanticEvent.create("settlement.late", ingestorId, { transaction: lateTx }),
+						ingestorId,
+					)
+				}
+			}, this.streamLateDelayMs)
+			this.pendingTimers.add(timer)
+		}
+
+		this.emit()
+	}
+
+	pauseContinuousStream(): { ok: boolean; error?: string } {
+		if (!this.isContinuousStream || !this.streamRunning) {
+			return { ok: false, error: "No active continuous stream to pause." }
+		}
+		this.streamPaused = true
+		if (this.streamTimer) {
+			clearInterval(this.streamTimer)
+			this.streamTimer = null
+		}
+		this.pushLog("[Stream] Paused continuous generator (in-flight loops & HITL remain live).")
+		this.emit()
+		return { ok: true }
+	}
+
+	resumeContinuousStream(): { ok: boolean; error?: string } {
+		if (!this.isContinuousStream || !this.streamRunning) {
+			return { ok: false, error: "No active continuous stream to resume." }
+		}
+		if (this.state.isLlmBudgetExhausted()) {
+			return { ok: false, error: "Live LLM call budget reached; start a new run or switch to Mock Mode." }
+		}
+		this.streamPaused = false
+		this.scheduleStreamInterval(this.runId)
+		this.pushLog("[Stream] Resumed continuous generator.")
+		this.emit()
+		return { ok: true }
+	}
+
+	stopContinuousStream(): { ok: boolean } {
+		this.clearAllTimers()
+		this.streamRunning = false
+		this.streamPaused = false
+		if (this.isContinuousStream) {
+			this.status = "COMPLETED"
+			this.pushLog("[Stream] Stopped continuous generator.")
+		}
+		this.emit()
+		return { ok: true }
+	}
+
+	injectStreamTrap(kind?: TrapKind): { ok: boolean; trapKind?: TrapKind; error?: string } {
+		if (!this.isContinuousStream || !this.rt || !this.streamGenerator) {
+			return { ok: false, error: "Start Continuous Stream first before injecting a stream trap." }
+		}
+		const chosen = kind ?? ALL_TRAP_KINDS[this.trapsInjected % ALL_TRAP_KINDS.length]
+		void this.runStreamTick(this.runId, chosen)
+		return { ok: true, trapKind: chosen }
+	}
+
+	async waitForCurrentIdle(timeoutMs = 15000): Promise<void> {
+		await this.state.waitForIdle(timeoutMs)
 	}
 
 	private async executeWaves(
@@ -275,8 +536,8 @@ export class SessionController {
 	}
 
 	injectLateSettlement(): { ok: boolean; error?: string } {
-		if (!this.rt || !this.ingestorId) {
-			return { ok: false, error: "No active run. Start the Black Friday stream first." }
+		if (!this.rt || !this.ingestorId || this.isContinuousStream) {
+			return { ok: false, error: "No active fixed-pack run. Start Interactive Stream first." }
 		}
 		if (this.lateSettlementInjected) {
 			return { ok: false, error: "Late settlement TX-2017 was already injected in this run." }
@@ -329,10 +590,15 @@ export class SessionController {
 		const live = resolveLiveProviderFromEnv()
 		const inv1007 = this.state.getCell("INV-1007")?.read().value
 		const canInjectLateSettlement =
+			!this.isContinuousStream &&
 			this.rt !== null &&
 			this.manualLateSettlement &&
 			!this.lateSettlementInjected &&
 			Boolean(inv1007?.drafts.some((d) => d.status === "ACTIVE"))
+
+		const snapshotState = this.isContinuousStream
+			? this.state.toSnapshot({ maxCells: 60, maxSpans: 60, maxAudit: 120, newestFirst: true })
+			: this.state.toSnapshot()
 
 		return {
 			runId: this.runId,
@@ -343,9 +609,17 @@ export class SessionController {
 			manualLateSettlement: this.manualLateSettlement,
 			lateSettlementInjected: this.lateSettlementInjected,
 			canInjectLateSettlement,
+			stream: {
+				active: this.isContinuousStream,
+				running: this.streamRunning,
+				paused: this.streamPaused,
+				tickCount: this.streamTickCount,
+				trapsInjected: this.trapsInjected,
+				intervalMs: this.streamIntervalMs,
+			},
 			disclaimer: this.pack.disclaimer,
 			logs: [...this.logs],
-			...this.state.toSnapshot(),
+			...snapshotState,
 		}
 	}
 }

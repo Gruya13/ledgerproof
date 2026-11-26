@@ -50,14 +50,21 @@ Open **http://localhost:4317** in your browser and click **Start Interactive Str
 3. Click **Inject Late Settlement (TX-2017)** to watch `INV-1007` close and its active overdue chase draft flip automatically to **`STALE`**.
 4. Inspect **Blocked / Rejected Claims** (L1 hallucination `$319.99 / TX-9999` + L2 CAS write-skew catch on `INV-1011`) and click any `[src:ID]` pill to verify its `SHA-256` source record.
 
-### Automated Proof, CLI Demo & Tests
+### Automated Proof, CLI Demo & Continuous Stream
 
 ```bash
-npm run proof          # Automated 12/12 ground-truth + concurrency invariants check
-npm run demo -- --auto # Non-interactive CLI run + exports out/audit-trace.jsonl
-npm test               # Vitest unit + E2E + HTTP/SSE API suite
-npm run typecheck      # TypeScript check for both backend and React UI
+npm run proof                               # Automated 12/12 ground-truth + concurrency invariants check
+npm run demo -- --auto                      # Non-interactive CLI run + exports out/audit-trace.jsonl
+npm run demo -- --stream --ticks 8 --auto   # Continuous Chaos Stream in CLI (periodic traps + HITL)
+npm test                                    # Vitest unit + E2E + HTTP/SSE + Continuous Stream suites
+npm run typecheck                           # TypeScript check for both backend and React UI
 ```
+
+### Continuous Chaos Stream Mode (Web UI & CLI)
+
+In the Web UI (`npm run ui`) or CLI (`--stream`), **ContinuousStreamGenerator** emits synthetic Black Friday invoices, payments, and SEPA requests (`INV-2001+`, `TX-5001+`, `REQ-6001+`) continuously while periodically (or on-demand via **Inject Trap Now**) injecting 6 intentional anomalies:
+- `split_typo`, `partial_late_stale`, `duplicate_invoice`, `orphan_wire`, `bec_iban_change` (non-blocking HITL pause), and `write_skew_race` (L1 + L2 CAS interlock).
+- In **Live LLM Mode**, a built-in `maxLlmCalls` budget guard (`default: 40`) auto-pauses the stream before runaway API usage while deterministic `StrictMatcher` ticks still cost `0` LLM calls.
 
 ---
 

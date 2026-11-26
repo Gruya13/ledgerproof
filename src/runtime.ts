@@ -8,10 +8,13 @@ import type {
 	AgentSpan,
 	ApprovalDecision,
 	AuditEntry,
+	BankTransaction,
 	BlackFridayPack,
 	ClaimRecord,
 	ConcurrencyMetrics,
+	Invoice,
 	LedgerRecord,
+	PaymentRequest,
 	PendingApproval,
 	RejectedAttempt,
 } from "./types"
@@ -74,32 +77,84 @@ export class LedgerState extends RuntimeState {
 	private readonly activeLoopsByKey = new Map<string, AgentSpan>()
 	private readonly idleWaiters: Array<() => void> = []
 	private readonly changeListeners = new Set<() => void>()
+	private readonly maxLlmCalls?: number
 	private pendingExternalWork = 0
 	private auditSeq = 0
 
-	constructor(pack: BlackFridayPack, approvalBroker?: ApprovalBroker) {
+	constructor(
+		pack: BlackFridayPack,
+		approvalBroker?: ApprovalBroker,
+		options: { seedInvoices?: boolean; maxLlmCalls?: number } = {},
+	) {
 		super()
-		this.sourceStore = SourceStore.fromPack(pack)
+		const seedInvoices = options.seedInvoices ?? true
+		this.maxLlmCalls = options.maxLlmCalls
+		this.sourceStore = seedInvoices
+			? SourceStore.fromPack(pack)
+			: SourceStore.fromPack({
+					...pack,
+					invoices: [],
+					transactions: [],
+					requests: [],
+				})
 		this.spendingLimitCents = pack.spendingLimitCents
 		this.approvalBroker = approvalBroker ?? new ApprovalBroker()
 
-		for (const inv of pack.invoices) {
-			this.cells.set(
-				inv.sourceId,
-				new VersionedCell<LedgerRecord>({
-					invoiceId: inv.sourceId,
-					vendorId: inv.vendorId,
-					expectedAmountCents: inv.amountCents,
-					paidAmountCents: 0,
-					currency: inv.currency,
-					status: "OPEN",
-					matchedTxIds: [],
-					riskFlags: [],
-					drafts: [],
-					notes: [],
-				}),
-			)
+		if (seedInvoices) {
+			for (const inv of pack.invoices) {
+				this.ensureInvoiceCell(inv)
+			}
 		}
+	}
+
+	private ensureInvoiceCell(inv: Invoice): void {
+		if (this.cells.has(inv.sourceId)) return
+		this.cells.set(
+			inv.sourceId,
+			new VersionedCell<LedgerRecord>({
+				invoiceId: inv.sourceId,
+				vendorId: inv.vendorId,
+				expectedAmountCents: inv.amountCents,
+				paidAmountCents: 0,
+				currency: inv.currency,
+				status: "OPEN",
+				matchedTxIds: [],
+				riskFlags: [],
+				drafts: [],
+				notes: [],
+			}),
+		)
+	}
+
+	registerInvoice(invoice: Invoice): void {
+		this.sourceStore.addInvoice(invoice)
+		this.ensureInvoiceCell(invoice)
+		this.markInvoiceArrived(invoice.sourceId)
+		this.notifyChange()
+	}
+
+	registerTransaction(tx: BankTransaction): void {
+		this.sourceStore.addTransaction(tx)
+		this.markTransactionArrived(tx.sourceId)
+		this.notifyChange()
+	}
+
+	registerRequest(req: PaymentRequest): void {
+		this.sourceStore.addRequest(req)
+		this.markRequestArrived(req.sourceId)
+		this.notifyChange()
+	}
+
+	canStartLlmLoop(): boolean {
+		return this.maxLlmCalls === undefined || this.metrics.llmCalls < this.maxLlmCalls
+	}
+
+	isLlmBudgetExhausted(): boolean {
+		return this.maxLlmCalls !== undefined && this.metrics.llmCalls >= this.maxLlmCalls
+	}
+
+	getMaxLlmCalls(): number | undefined {
+		return this.maxLlmCalls
 	}
 
 	markInvoiceArrived(invoiceId: string): void {
@@ -216,8 +271,16 @@ export class LedgerState extends RuntimeState {
 		}
 	}
 
-	toSnapshot() {
-		const cells = [...this.cells.entries()].map(([invoiceId, cell]) => {
+	toSnapshot(opts: { maxCells?: number; maxSpans?: number; maxAudit?: number; newestFirst?: boolean } = {}) {
+		let cellEntries = [...this.cells.entries()]
+		const totalCellsCount = cellEntries.length
+		if (opts.newestFirst) {
+			cellEntries = cellEntries.reverse()
+		}
+		if (opts.maxCells !== undefined && cellEntries.length > opts.maxCells) {
+			cellEntries = cellEntries.slice(0, opts.maxCells)
+		}
+		const cells = cellEntries.map(([invoiceId, cell]) => {
 			const snap = cell.read()
 			return {
 				invoiceId,
@@ -225,16 +288,33 @@ export class LedgerState extends RuntimeState {
 				record: snap.value,
 			}
 		})
+
+		const spans =
+			opts.maxSpans !== undefined && this.metrics.spans.length > opts.maxSpans
+				? structuredClone(this.metrics.spans.slice(-opts.maxSpans))
+				: structuredClone(this.metrics.spans)
+
+		const auditLog =
+			opts.maxAudit !== undefined && this.auditLog.length > opts.maxAudit
+				? structuredClone(this.auditLog.slice(-opts.maxAudit))
+				: structuredClone(this.auditLog)
+
 		return {
 			spendingLimitCents: this.spendingLimitCents,
+			totalCellsCount,
+			maxLlmCalls: this.maxLlmCalls ?? null,
+			llmBudgetExhausted: this.isLlmBudgetExhausted(),
 			cells,
 			unmatchedTxIds: [...this.unmatchedTxIds],
 			nonInvoiceFeeTxIds: [...this.nonInvoiceFeeTxIds],
 			claims: structuredClone(this.claims),
 			rejectedAttempts: structuredClone(this.rejectedAttempts),
 			pendingApprovals: [...this.pendingApprovals.values()].map((a) => structuredClone(a)),
-			metrics: structuredClone(this.metrics),
-			auditLog: structuredClone(this.auditLog),
+			metrics: {
+				...structuredClone(this.metrics),
+				spans,
+			},
+			auditLog,
 		}
 	}
 
