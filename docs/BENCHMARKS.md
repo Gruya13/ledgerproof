@@ -16,7 +16,7 @@ Verified on commit `0f1046d` (and after adding documentation):
 |---|---|---|
 | `npm run typecheck` | Pass | Backend TypeScript (`tsc --noEmit`) + React UI (`tsc -p tsconfig.ui.json --noEmit`) |
 | `npm run ui:build` | Pass | Production Vite bundle (`dist-ui/`) |
-| `npm test` | **9 files / 26 tests passed** | Unit, E2E concurrency, HTTP/SSE API, Continuous Chaos Stream, L1 IBAN/vendor/kind/citation binding, ISO 13616 IBAN mod-97, immutable `SourceStore` enforcement, post-HITL staleness, refund balance checks, `<DbtrAgt>` XML |
+| `npm test` | **9 files / 27 tests passed** | Unit, E2E concurrency, HTTP/SSE API, Continuous Chaos Stream, per-visitor session isolation, L1 IBAN/vendor/kind/citation binding, ISO 13616 IBAN mod-97, immutable `SourceStore` enforcement, post-HITL staleness, refund balance checks, `<DbtrAgt>` XML |
 | `npm run proof` | **`PROOF PASSED` (`12/12`)** | `18` peak concurrent loops, `22/22` finished, `10` deterministic `0`-token matches, `1` CAS conflict stopped, `1` L1 blocked, `1` `STALE` invalidation, `1` HITL routed, `0` invented numbers leaked |
 
 ---

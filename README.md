@@ -1,10 +1,18 @@
 # LedgerProof
 
 [![CI](https://github.com/Gruya13/ledgerproof/actions/workflows/ci.yml/badge.svg)](https://github.com/Gruya13/ledgerproof/actions/workflows/ci.yml)
+![Docker](https://img.shields.io/badge/Docker-AMD64%20%7C%20ARM64-2496ED?logo=docker&logoColor=white)
+![Mozaik](https://img.shields.io/badge/Mozaik-%40mozaik--ai%2Fcore%206.0.0-38bdf8)
+![Node](https://img.shields.io/badge/Node-%3E%3D22-339933?logo=node.js&logoColor=white)
+![Tests](https://img.shields.io/badge/Tests-27%20passing-10b981)
+[![License: MIT](https://img.shields.io/badge/License-MIT-f59e0b)](LICENSE)
 
 **LedgerProof reconciles high-volume Black Friday payments across concurrent Mozaik agents (`@mozaik-ai/core@6.0.0`) — settling clean invoices deterministically with zero LLM tokens while mechanically blocking hallucinated numbers, write-skew refunds, and spoofed BEC IBAN payouts mid-loop.**
 
 > **Compliance Notice:** LedgerProof uses **100% synthetic financial data** for demonstration only. Output is **not financial advice**.
+
+![LedgerProof Obsidian Treasury UI](docs/assets/ledgerproof-ui.png)
+*Obsidian Treasury Web UI running on `@mozaik-ai/core@6.0.0`: ProofGate L1/L2/L3 telemetry KPIs, non-blocking `REQ-3002` BEC IBAN human approval card (`€640.00`), and overlapping concurrent Mozaik agent swimlanes.*
 
 ---
 
@@ -105,7 +113,7 @@ Full per-run tables, per-seed metrics, scenario distributions, and engineering n
 
 | Run | Mode / Seed | Scale | Concurrency & Loops | 0-Token Strict Matches | ProofGate Catches & Invariants |
 |---|---|---|---|---|---|
-| `npm test` | `MockInferenceRunner` + HTTP/SSE + Unit | `9` suites / `26` tests | Full concurrent E2E & stream | Deterministic pass | `inventedNumbersLeaked = 0`, L1 IBAN/vendor/kind/citation binding, IBAN mod-97, immutable `SourceStore`, post-HITL staleness, refund balance, `<DbtrAgt>` XML |
+| `npm test` | `MockInferenceRunner` + HTTP/SSE + Unit | `9` suites / `27` tests | Full concurrent E2E & stream | Deterministic pass | `inventedNumbersLeaked = 0`, session isolation, L1 IBAN/vendor/kind/citation binding, IBAN mod-97, immutable `SourceStore`, post-HITL staleness, refund balance, `<DbtrAgt>` XML |
 | `npm run proof` | `MockInferenceRunner` (fixed pack) | `12/12` invoices | `18` peak concurrent, `22/22` finished | `10` | `1` CAS conflict stopped, `1` L1 blocked, `1` `STALE`, `1` HITL, `0` leaked |
 | `npm start` (`3×` runs, `0f1046d`) | Live `deepseek-chat` (fixed pack) | `36/36` GT invoices (`3×12`) | `21` max peak, `66/66` finished | Deterministic path + `1` CAS each | `3/3` CAS stopped (`INV-1011`), `3/3` `STALE` (`INV-1007`), `3/3` BEC HITL rejected (`REQ-3002`), `0` leaked |
 | `npm start -- --stream --ticks 80` | Live `deepseek-chat`, seed `2811646950` | `80` ticks (`26` traps), `83/83` invoices closed | `12` peak concurrent, `99/99` finished | `74` | Live L1 catch `REJ-2` (`$28,865.00` vs `$288.65` on `TX-5013`), `10` HITL, `2` `STALE`, `0` leaked |
